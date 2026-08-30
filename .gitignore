@@ -1,0 +1,13 @@
+dist/
+*.o
+*.dll
+*.exe
+*.zip
+*.ini
+.cache/
+agent-tools/
+third_party/ymfm/
+third_party/pmdmini/.git/
+third_party/pmdmini/.github/
+**/*.s98
+!tests/samples/**

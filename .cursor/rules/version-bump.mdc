@@ -1,0 +1,26 @@
+---
+description: Bump xmp-pc98 version on every new DLL build
+alwaysApply: true
+---
+
+# Version bump on every build
+
+Whenever you produce a new `xmp-pc98.dll` (make dll / pack / copy to XMPlay),
+bump the patch version first. Do not ship a rebuild that still says 1.0.x of
+the previous build.
+
+Keep these in lockstep (example for 1.0.4):
+
+- `src/pc98.h`: `PC98_PLUGIN_VERSION` `"1.0.4"`, `PC98_PLUGIN_XMPVER` `1000400`
+  (`major*1000000 + minor*10000 + patch*100`)
+- `src/xmp-pc98.rc`: `FILEVERSION` / `PRODUCTVERSION` `1,0,4,0` and the
+  string FileVersion / ProductVersion
+- `Makefile` pack zip name `xmp-pc98-1.0.4.zip`
+- `README.md` title and VERSIONINFO line
+
+Patch +1 for each new build. Use minor/major only for a real feature break.
+
+When a build is copied to XMPlay (or you tell the user the work is ready),
+end the reply with the exact string they should see in XMPlay, e.g.
+**XMPlay should show: PC-98 / S98 1.0.6**. If they still see the previous
+patch, they have not loaded the new DLL (restart XMPlay).

@@ -1,0 +1,17 @@
+xmp-pc98 is licensed under the GNU General Public License, version 2
+or later. That is required by statically linking pmdmini / PMDWin.
+
+  third_party/pmdmini/LICENSE.md   — full GPLv2 text
+  third_party/pmdmini/src/ymfm/    — ymfm, BSD-3-Clause (Aaron Giles)
+  third_party/tinysoundfont/       — TinySoundFont, MIT (Bernhard Schelling)
+
+You should have received a copy of the GNU General Public License
+along with this program (see third_party/pmdmini/LICENSE.md). If not,
+see <https://www.gnu.org/licenses/>.
+
+XMPlay SDK headers are © un4seen / Ian Luck and are used under the
+XMPlay plugin SDK terms.
+
+S98 file format: Mamiya / Ru^3.
+PMD: M. Kajihara. PMDWin / WinFMP: C60.
+Hoot: DMP Soft. hootrip: TheWhyteWolf (MIT).
