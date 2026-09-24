@@ -15,8 +15,8 @@
 #define IDC_MUTEMIDI1 1150
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,27,0
-PRODUCTVERSION 1,0,27,0
+FILEVERSION 1,0,28,0
+PRODUCTVERSION 1,0,28,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -29,12 +29,12 @@ BEGIN
 		BEGIN
 			VALUE "CompanyName", "Nicht Und Zwei"
 			VALUE "FileDescription", "XMPlay PC-98 / S98 input plugin"
-			VALUE "FileVersion", "1.0.27"
+			VALUE "FileVersion", "1.0.28"
 			VALUE "InternalName", "xmp-pc98.dll"
 			VALUE "LegalCopyright", "GPLv2+"
 			VALUE "OriginalFilename", "xmp-pc98.dll"
 			VALUE "ProductName", "xmp-pc98"
-			VALUE "ProductVersion", "1.0.27"
+			VALUE "ProductVersion", "1.0.28"
 		END
 	END
 	BLOCK "VarFileInfo"

@@ -59,7 +59,7 @@ OUR_CXX = player.cpp engines/s98_engine.cpp engines/pmd_engine.cpp \
 	engines/fmp_engine.cpp engines/hoot_engine.cpp engines/bgmdrv_engine.cpp \
 	engines/na_engine.cpp engines/mfd_engine.cpp engines/n3g_engine.cpp \
 	engines/pai_engine.cpp engines/msb_engine.cpp engines/md_engine.cpp \
-	engines/ntl_engine.cpp engines/gntl_engine.cpp engines/fmd_engine.cpp engines/msdrv_engine.cpp
+	engines/ntl_engine.cpp engines/gntl_engine.cpp engines/fmd_engine.cpp engines/msdrv_engine.cpp engines/mmd_engine.cpp
 OUR_C = config.c
 
 # cisc fmgen (in_s98 core). Skip opm.cpp — S98 OPM stays silent.

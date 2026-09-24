@@ -137,6 +137,18 @@ int fmp_probe_mem(const uint8_t *data, size_t len)
 {
 	uint16_t w0, w1;
 	if (!data || len < 16) return 0;
+	/* Kajihara MMD.COM songs (.MMD) — handled by mmd_engine, not WinFMP. */
+	if (len >= 0x52 && data[0] >= 20 && data[0] <= 250) {
+		int i, en = 0, ok = 1;
+		for (i = 0; i < 18; i++) {
+			uint16_t ptr = (uint16_t)(data[2 + i * 4] | (data[2 + i * 4 + 1] << 8));
+			uint8_t ch = data[2 + i * 4 + 3];
+			if (ch == 0xFF) continue;
+			if (ch > 0x1F || ptr >= len || ptr < 2) { ok = 0; break; }
+			en++;
+		}
+		if (ok && en >= 1) return 0;
+	}
 	if (data[0] <= 0x0f && (data[1] == 0x18 || data[1] == 0x1a) &&
 			(data[2] == 0 || data[2] == 0xe6))
 		return 0; /* PMD */

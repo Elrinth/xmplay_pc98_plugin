@@ -298,7 +298,7 @@ static void WINAPI pc_About(HWND win)
 		"S98 (cisc fmgen, same core as in_s98), PMD (pmdmini / PMDWin),\r\n"
 		"FMP (optional WinFMP.dll), BGMDRV .MUS, Packen NA .O, Melody\r\n"
 		"MFD/USO, N3G .MDT, Synthia .PAI, MBMUS .MSB, OPNDRV .MD,\r\n"
-		"ArtDink .NTL (F_* FM, G_* GM/SF2), FUGA packed .GMD/.MMD (SC-55 / CM-64 SF2),\r\n"
+		"ArtDink .NTL (F_* FM, G_* GM/SF2), Kajihara MMD.COM .MMD (GS/SC-55 SF2), FUGA packed .GMD/.MMD (SC-55 / CM-64 SF2),\r\n"
 		"and Hoot sets via hootrip.\r\n\r\n"
 		"This is NOT a wrap of S98Amp / in_s98.dll, in_fmpmd.dll, or ZXTune.\r\n"
 		"Delete or disable S98Amp, in_fmpmd, and ZXTune's S98/.M claims\r\n"
@@ -314,7 +314,7 @@ static void WINAPI pc_About(HWND win)
 		"hootrip.exe and cache .s98 for leftover custom drivers.\r\n"
 		"OPNA rhythm: ym2608_adpcm_rom.bin (preferred) or 2608_{BD,SD,TOP,HH,TOM,RIM}.WAV\r\n"
 		"next to the DLL / Rhythm path; without either, drums are silent.\r\n"
-		"WinFMP.dll is optional for .OPI/.FMD/.MMD.\r\n"
+		"WinFMP.dll is optional for .OPI/.FMD/.MMD (not Kajihara MMD.COM songs).\r\n"
 		"Packed Oerstedia .GMD/.MMD use SC-55.sf2 and an MT-32/CM-64 SF2\r\n"
 		"from XMPlay's midi soundfonts folder (or gs_sf2 / mt_sf2 in the ini).\r\n"
 		"32-bit XMPlay only (PE32 i386). License: GPLv2+.");

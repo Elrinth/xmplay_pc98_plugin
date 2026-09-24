@@ -1,11 +1,11 @@
-# xmp-pc98 1.0.27
+# xmp-pc98 1.0.28
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.27.0**; `PLUGIN_XMPVER` **1002700**.
+VERSIONINFO **1.0.28.0**; `PLUGIN_XMPVER` **1002800**.
 
-## 1.0.27
+## 1.0.28
 
 - **EC_10_SB drums**: OPL3 4-op CNT packing — primary CNT0 = tone byte0 bit1,
   pair CNT1 = bit0 (was both on primary; FB=7 hats became additive white noise).
@@ -37,5 +37,5 @@ found, OPNA drums are silent; File Info shows ROM / WAV / NONE.
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # or zip dist/pack → xmp-pc98-1.0.27.zip
+/usr/bin/make pack   # or zip dist/pack → xmp-pc98-1.0.28.zip
 ```
