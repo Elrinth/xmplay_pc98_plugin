@@ -45,6 +45,7 @@ struct ntl_ch {
 	int enabled, ended, ssg, conductor;
 	int pc, start, end, wait, keyed, slur, oct, vol, detune, def_len;
 	int loop_pc, loop_n, did_loop, gate, eff;
+	int voice; /* Eikan FM instrument index (opcode 84) */
 };
 
 struct ntl_state {
@@ -68,6 +69,8 @@ struct ntl_state {
 	char title[256], game[256];
 	int eikan_rate, eikan_acc, song_looped;
 	int64_t eikan_pit_acc, eikan_pit_step;
+	uint8_t voices[32][32]; /* Eikan FM bank from NTL (idx*32) */
+	int voice_ok[32];
 
 	ntl_state()
 		: eikan(0), opna(NULL), rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
@@ -81,6 +84,8 @@ struct ntl_state {
 		memset(pssg, 0, sizeof pssg);
 		memset(pcond, 0, sizeof pcond);
 		memset(ch, 0, sizeof ch);
+		memset(voices, 0, sizeof voices);
+		memset(voice_ok, 0, sizeof voice_ok);
 		title[0] = 0;
 		game[0] = 0;
 	}
@@ -133,6 +138,41 @@ static void apply_def(ntl_state *s, int c, int vol)
 				(uint8_t)v);
 	}
 	wrx(s, ext, (uint8_t)(0xB0 + slot), k_def_pat[24]);
+	wrx(s, ext, (uint8_t)(0xB4 + slot), 0xC0);
+}
+
+/* Eikan NTL voice: 4 ops × (DT/MUL,TL,KS/AR,DR,SR,SL/RR) + FB/ALG (+7 pad).
+ * Carriers get volume attenuation (vol 0..15 → 0..60 TL). */
+static const uint8_t k_eikan_carriers[8] = {
+	0x08, 0x08, 0x08, 0x08, 0x0A, 0x0E, 0x0E, 0x0F
+};
+
+static void apply_voice(ntl_state *s, int c, int idx, int vol)
+{
+	int ext = c >= 3;
+	int slot = ext ? c - 3 : c;
+	int i, atten, alg, mask;
+	const uint8_t *v;
+	if (idx < 0 || idx >= 32 || !s->voice_ok[idx]) {
+		apply_def(s, c, vol);
+		return;
+	}
+	v = s->voices[idx];
+	/* Eikan 8F: 0 = loudest, 15 = quietest (opposite of Sekigahara scale). */
+	atten = (vol & 15) * 4;
+	alg = v[24] & 7;
+	mask = k_eikan_carriers[alg];
+	for (i = 0; i < 24; ++i) {
+		int val = v[i];
+		/* bytes 4..7 = TL for ops 0..3 */
+		if (i >= 4 && i < 8 && (mask & (1 << (i - 4)))) {
+			val += atten;
+			if (val > 127) val = 127;
+		}
+		wrx(s, ext, (uint8_t)(0x30 + slot + ((i >> 2) * 16) + ((i & 3) * 4)),
+				(uint8_t)val);
+	}
+	wrx(s, ext, (uint8_t)(0xB0 + slot), v[24]);
 	wrx(s, ext, (uint8_t)(0xB4 + slot), 0xC0);
 }
 
@@ -226,11 +266,11 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 			if (fetchb(s, ch, &a))
 				ch->detune = (int)a - 0x20;
 			return;
-		case 0x84:
+		case 0x84: /* instrument program (not volume!) */
 			if (fetchb(s, ch, &a)) {
-				ch->vol = a & 15;
+				ch->voice = a & 31;
 				if (!dry && !ch->ssg)
-					apply_def(s, c, ch->vol);
+					apply_voice(s, c, ch->voice, ch->vol);
 			}
 			return;
 		case 0x85:
@@ -307,11 +347,11 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 			}
 			return;
 		}
-		case 0x8F:
+		case 0x8F: /* volume 0..15; re-apply current voice with new TL */
 			if (fetchb(s, ch, &a)) {
 				ch->vol = a & 15;
 				if (!dry && !ch->ssg)
-					apply_def(s, c, ch->vol);
+					apply_voice(s, c, ch->voice, ch->vol);
 			}
 			return;
 		case 0x90: {
@@ -625,6 +665,25 @@ static int parse_header(ntl_state *s)
 			if (tmp[0]) pc98_bounded(s->title, sizeof s->title, tmp);
 		}
 	}
+	/* Eikan FM voice bank sits right after the part table:
+	 * [n_fm][off16][n_ssg][off16]; off relative to byte 3; each voice is
+	 * idx_byte + 32 data bytes. */
+	if (s->eikan) {
+		int bx = 4 + cnt * 3;
+		int n_fm, off_fm, j, idx, src;
+		memset(s->voice_ok, 0, sizeof s->voice_ok);
+		if (bx + 6 <= (int)n) {
+			n_fm = d[bx];
+			off_fm = (int)rd16(d + bx + 1);
+			src = 3 + off_fm;
+			for (j = 0; j < n_fm && src + 33 <= (int)n; ++j) {
+				idx = d[src++] & 31;
+				memcpy(s->voices[idx], d + src, 32);
+				s->voice_ok[idx] = 1;
+				src += 32;
+			}
+		}
+	}
 	{
 		int any = 0;
 		for (i = 0; i < NTL_CH; ++i)
@@ -666,8 +725,13 @@ static void reset_play(ntl_state *s, int dry)
 		s->ch[i].def_len = s->eikan ? 0x30 : 12;
 		s->ch[i].gate = 0;
 		s->ch[i].eff = 0;
-		if (!s->ch[i].ssg && !s->ch[i].conductor && !dry)
-			apply_def(s, i, s->ch[i].vol);
+		s->ch[i].voice = 0;
+		if (!s->ch[i].ssg && !s->ch[i].conductor && !dry) {
+			if (s->eikan)
+				apply_voice(s, i, s->ch[i].voice, s->ch[i].vol);
+			else
+				apply_def(s, i, s->ch[i].vol);
+		}
 	}
 }
 

@@ -285,6 +285,9 @@ class Harness:
             # Skip bitmask sentinel 0x80FF (allocate probe), not table ptrs like 0x6FFF
             if not allow_ff and val == 0x80FF:
                 return False
+            # FM/SSG voice RAM (DS:8064 / DS:8464) — real data addrs, not biased code
+            if val in (0x8064, 0x8464):
+                return False
             if B <= val <= B + 0x2800:
                 struct.pack_into("<H", blob, off, (val - B) & 0xFFFF)
                 return True
