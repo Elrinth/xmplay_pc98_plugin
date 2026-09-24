@@ -1,11 +1,18 @@
-# xmp-pc98 1.0.30
+# xmp-pc98 1.0.31
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.30.0**; `PLUGIN_XMPVER` **1003000**.
+VERSIONINFO **1.0.31.0**; `PLUGIN_XMPVER` **1003100**.
 
-## 1.0.30
+## 1.0.31
+
+- **MUSIC.PAC / Eikan dialect (ArtDink)**: notes use bit6 length (like GNTL) and
+  pitch nibble; part offsets are `table+3`; `0x8A` is an in-place counted phrase
+  loop (`count` + `off8`); `0x80` ends a track. Sekigahara NTL path unchanged.
+- Fixes 1.0.30 hang (“deeee-duuuuu…” held notes) from always-consuming a length
+  byte and misreading `0x8A` as a Sekigahara start/end pair.
+
 
 - **ArtDink MUSIC.PAC** (Eikan wa Kimi ni 3): multi-song archive of `.NTL`
   blobs (LE32 size table + packed songs). 105 subsongs via GetSubSongs /
@@ -33,5 +40,5 @@ Copy `xmp-pc98.dll` next to `xmplay.exe`.
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # → dist/xmp-pc98-1.0.30.zip (DLL + README + LICENSE)
+/usr/bin/make pack   # → dist/xmp-pc98-1.0.31.zip (DLL + README + LICENSE)
 ```

@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 #define PC98_PLUGIN_NAME    "PC-98 / S98"
-#define PC98_PLUGIN_VERSION "1.0.30"
-#define PC98_PLUGIN_XMPVER  1003000
+#define PC98_PLUGIN_VERSION "1.0.31"
+#define PC98_PLUGIN_XMPVER  1003100
 #define PC98_MAX_FILE       (16u * 1024u * 1024u)
 #define PC98_MAX_SONGS      256
 #define PC98_DEFAULT_RATE   44100

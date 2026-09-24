@@ -42,6 +42,8 @@ struct ntl_ch {
 
 struct ntl_state {
 	std::vector<uint8_t> file;
+	std::vector<uint8_t> file0; /* pristine copy for Eikan in-place 0x8A counts */
+	int eikan; /* ArtDink Eikan dialect (PAC): bit6 note len, off+3, 8A count/off8 */
 	int part[NTL_CH];
 	int part_end[NTL_CH];
 	int pssg[NTL_CH];
@@ -59,7 +61,7 @@ struct ntl_state {
 	char title[256], game[256];
 
 	ntl_state()
-		: opna(NULL), rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
+		: eikan(0), opna(NULL), rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
 		  ended(0), tb(0xC0), mute_fm(0), mute_ssg(0),
 		  chip_pos(0), chip_step(0), irq_acc(0), last_l(0), last_r(0),
 		  play_samples(0), play_limit(0), ssg_mix(0xB8)
@@ -144,7 +146,7 @@ static void play_note(ntl_state *s, int c, int name, int dry)
 	ntl_ch *ch = &s->ch[c];
 	int n, oct, fn, blk;
 	if (dry || ch->conductor) return;
-	n = name - 0x40;
+	n = s->eikan ? (name & 0x0F) : (name - 0x40);
 	if (n < 0) n = 0;
 	oct = ch->oct;
 	while (n > 11) { n -= 12; oct++; }
@@ -197,11 +199,17 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 	int a = 0, b = 0;
 	switch (cmd) {
 	case 0x80:
+		if (s->eikan) {
+			if (!dry) keyoff(s, c);
+			ch->ended = 1;
+			if (measure) ch->did_loop = 1;
+		}
 		return;
 	case 0x81:
 		if (fetchb(s, ch, &a)) {
 			ch->def_len = a > 0 ? a : 1;
 			ch->wait = ch->def_len;
+			if (!dry) keyoff(s, c);
 		}
 		return;
 	case 0x82:
@@ -231,9 +239,35 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 	case 0x8F:
 	case 0x91:
 	case 0x92:
+	case 0x99:
 		fetchb(s, ch, &a);
 		return;
+	case 0x8C:
+	case 0x8E:
+		return;
 	case 0x8A:
+		if (s->eikan) {
+			/* 8A <count> <off8> at end of phrase. Playback: dec + jump back.
+			 * Measure: body already played once to reach here — fall through
+			 * so one_loop is one pass through the score (not 3× every phrase). */
+			int cpos = ch->pc;
+			if (!fetchb(s, ch, &a) || !fetchb(s, ch, &b)) return;
+			if (cpos < 0 || cpos >= (int)s->file.size()) return;
+			if (measure) {
+				s->file[cpos] = 0;
+				return;
+			}
+			s->file[cpos] = (uint8_t)(s->file[cpos] - 1);
+			if (s->file[cpos] == 0) {
+				if (cpos < (int)s->file0.size())
+					s->file[cpos] = s->file0[cpos];
+			} else {
+				int body = (cpos + 1) - (b & 0xFF);
+				if (body < ch->start) body = ch->start;
+				ch->pc = body;
+			}
+			return;
+		}
 		if (!fetchb(s, ch, &a) || !fetchb(s, ch, &b)) return;
 		if (a > 1) {
 			ch->loop_pc = ch->pc;
@@ -287,7 +321,20 @@ static void fetch(ntl_state *s, int c, int dry, int measure)
 			return;
 		}
 		b = s->file[ch->pc++];
-		if (b < 0x80) {
+		if (s->eikan && b < 0x40) {
+			ch->wait = ch->def_len > 0 ? ch->def_len : 1;
+			play_note(s, c, b, dry);
+			return;
+		}
+		if (s->eikan && b < 0x80) {
+			if (!fetchb(s, ch, &ln)) { ch->ended = 1; return; }
+			if (ln < 1) ln = 1;
+			ch->wait = ln;
+			ch->def_len = ln;
+			play_note(s, c, b, dry);
+			return;
+		}
+		if (!s->eikan && b < 0x80) {
 			if (!fetchb(s, ch, &ln)) { ch->ended = 1; return; }
 			if (ln < 1) ln = 1;
 			ch->wait = ln;
@@ -346,9 +393,18 @@ static int parse_header(ntl_state *s)
 	cnt = d[3];
 	memset(s->part, 0, sizeof s->part);
 	memset(s->part_end, 0, sizeof s->part_end);
+	/* Eikan (HSB3) stores part offsets relative to byte 3; stream at off+3
+	 * starts with 0x8F/0x96. Sekigahara uses absolute off to the stream. */
+	{
+		int o0 = (cnt > 0 && 6 < (int)n) ? (int)rd16(d + 4) : 0;
+		int at0 = (o0 > 0 && o0 < (int)n) ? d[o0] : 0;
+		int at3 = (o0 > 0 && o0 + 3 < (int)n) ? d[o0 + 3] : 0;
+		s->eikan = (at3 >= 0x80 && at0 < 0x80) ? 1 : 0;
+	}
 	for (i = 0; i < cnt && 4 + (i + 1) * 3 <= (int)n; ++i) {
 		off = (int)rd16(d + 4 + i * 3);
 		typ = d[4 + i * 3 + 2];
+		if (s->eikan) off += 3;
 		if (off > 0 && off < (int)n && noff < 64)
 			offs[noff++] = off;
 		if (off <= 0 || off >= (int)n) continue;
@@ -409,6 +465,8 @@ static int parse_header(ntl_state *s)
 static void reset_play(ntl_state *s, int dry)
 {
 	int i;
+	if (!s->file0.empty())
+		s->file = s->file0; /* restore 0x8A counts */
 	memset(s->ch, 0, sizeof s->ch);
 	s->ended = 0;
 	s->irq_acc = 0;
@@ -474,6 +532,7 @@ static int setup(ntl_state *s, const char *filename, const uint8_t *data,
 	uint32_t sr;
 	if (!data || !pc98_looks_ntl(data, len)) return -1;
 	s->file.assign(data, data + len);
+	s->file0 = s->file;
 	if (parse_header(s) != 0) return -1;
 	s->rate = cfg && cfg->rate > 0 ? cfg->rate : PC98_DEFAULT_RATE;
 	s->loops_want = cfg && cfg->loop_count > 0 ? cfg->loop_count : 1;
@@ -518,7 +577,8 @@ int ntl_analyze_mem(const char *filename, const uint8_t *data, size_t len,
 	pc98_bounded(out->title, sizeof out->title, tmp.title);
 	pc98_bounded(out->game, sizeof out->game, tmp.game);
 	pc98_bounded(out->filetype, sizeof out->filetype, "NTL");
-	pc98_bounded(out->engine, sizeof out->engine, "ymfm ArtDink NTL");
+	pc98_bounded(out->engine, sizeof out->engine,
+			tmp.eikan ? "ymfm ArtDink NTL (Eikan)" : "ymfm ArtDink NTL");
 	delete tmp.opna;
 	return 0;
 }

@@ -28,6 +28,8 @@ struct gntl_ch {
 
 struct gntl_state {
 	std::vector<uint8_t> file;
+	std::vector<uint8_t> file0;
+	int eikan;
 	gntl_ch ch[GNTL_CH];
 	int rate, loops_want, one_loop_ms, ended, tb;
 	int mute_mel, mute_rhy;
@@ -42,7 +44,7 @@ struct gntl_state {
 	float rev_r[GNTL_REV_MAX];
 
 	gntl_state()
-		: rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
+		: eikan(0), rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
 		  ended(0), tb(0xC0), mute_mel(0), mute_rhy(0), irq_acc(0),
 		  play_samples(0), play_limit(0), sf(NULL),
 		  master_gain(1.f), rev_wet(0), rev_fb(0), rev_len(0), rev_i(0)
@@ -215,6 +217,11 @@ static void do_cmd(gntl_state *s, gntl_ch *ch, int cmd, int dry, int measure)
 	int a = 0, b = 0;
 	switch (cmd) {
 	case 0x80:
+		if (s->eikan) {
+			if (!dry) note_off(s, ch);
+			ch->ended = 1;
+			if (measure) ch->did_loop = 1;
+		}
 		return;
 	case 0x81:
 		if (fetchb(s, ch, &a)) {
@@ -263,6 +270,28 @@ static void do_cmd(gntl_state *s, gntl_ch *ch, int cmd, int dry, int measure)
 		fetchb(s, ch, &b);
 		return;
 	case 0x8A:
+		if (s->eikan) {
+			/* 8A <count> <off8> at end of phrase. Playback: dec + jump back.
+			 * Measure: body already played once to reach here — fall through
+			 * so one_loop is one pass through the score (not 3× every phrase). */
+			int cpos = ch->pc;
+			if (!fetchb(s, ch, &a) || !fetchb(s, ch, &b)) return;
+			if (cpos < 0 || cpos >= (int)s->file.size()) return;
+			if (measure) {
+				s->file[cpos] = 0;
+				return;
+			}
+			s->file[cpos] = (uint8_t)(s->file[cpos] - 1);
+			if (s->file[cpos] == 0) {
+				if (cpos < (int)s->file0.size())
+					s->file[cpos] = s->file0[cpos];
+			} else {
+				int body = (cpos + 1) - (b & 0xFF);
+				if (body < ch->start) body = ch->start;
+				ch->pc = body;
+			}
+			return;
+		}
 		if (!fetchb(s, ch, &a) || !fetchb(s, ch, &b)) return;
 		if (a > 1) {
 			ch->loop_pc = ch->pc;
@@ -391,9 +420,16 @@ static int parse_header(gntl_state *s)
 	if (n < 16 || !pc98_looks_ntl_midi(d, n)) return -1;
 	cnt = d[3];
 	memset(s->ch, 0, sizeof s->ch);
+	{
+		int o0 = (cnt > 0 && 6 < (int)n) ? (int)rd16(d + 4) : 0;
+		int at0 = (o0 > 0 && o0 < (int)n) ? d[o0] : 0;
+		int at3 = (o0 > 0 && o0 + 3 < (int)n) ? d[o0 + 3] : 0;
+		s->eikan = (at3 >= 0x80 && at0 < 0x80) ? 1 : 0;
+	}
 	for (i = 0; i < cnt && 4 + (i + 1) * 3 <= (int)n; ++i) {
 		off = (int)rd16(d + 4 + i * 3);
 		typ = d[4 + i * 3 + 2];
+		if (s->eikan) off += 3;
 		if (off > 0 && off < (int)n && noff < 64)
 			offs[noff++] = off;
 		if (off <= 0 || off >= (int)n) continue;
@@ -435,6 +471,8 @@ static int parse_header(gntl_state *s)
 
 static void reset_play(gntl_state *s, int dry)
 {
+	if (!s->file0.empty())
+		s->file = s->file0;
 	int i;
 	s->ended = 0;
 	s->irq_acc = 0;
@@ -492,6 +530,7 @@ static int setup(gntl_state *s, const char *filename, const uint8_t *data,
 {
 	if (!data || !pc98_looks_ntl_midi(data, len)) return -1;
 	s->file.assign(data, data + len);
+	s->file0 = s->file;
 	if (parse_header(s) != 0) return -1;
 	s->rate = cfg && cfg->rate > 0 ? cfg->rate : PC98_DEFAULT_RATE;
 	s->loops_want = cfg && cfg->loop_count > 0 ? cfg->loop_count : 1;
