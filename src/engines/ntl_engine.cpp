@@ -43,7 +43,7 @@ public:
 
 struct ntl_ch {
 	int enabled, ended, ssg, conductor;
-	int pc, start, end, wait, keyed, slur, oct, vol, detune, def_len;
+	int pc, start, end, wait, keyed, slur, oct, vol, vol_b, detune, def_len;
 	int loop_pc, loop_n, did_loop, gate, eff;
 	int voice; /* Eikan FM instrument index (opcode 84) */
 };
@@ -142,10 +142,42 @@ static void apply_def(ntl_state *s, int c, int vol)
 }
 
 /* Eikan NTL voice: 4 ops × (DT/MUL,TL,KS/AR,DR,SR,SL/RR) + FB/ALG (+7 pad).
- * Carriers get volume attenuation (vol 0..15 → 0..60 TL). */
+ * Voice byte order matches OPN regs 40/44/48/4C = Op1,Op3,Op2,Op4.
+ * Carriers (by algorithm) get TL += vol_a + vol_b (opcodes 8F + 83), 1:1. */
 static const uint8_t k_eikan_carriers[8] = {
 	0x08, 0x08, 0x08, 0x08, 0x0A, 0x0E, 0x0E, 0x0F
 };
+
+static int eikan_atten(const ntl_ch *ch)
+{
+	int a = (ch->vol & 0x7F) + (ch->vol_b & 0x7F);
+	if (a > 127) a = 127;
+	return a;
+}
+
+static void apply_eikan_tl(ntl_state *s, int c)
+{
+	ntl_ch *ch = &s->ch[c];
+	int ext = c >= 3;
+	int slot = ext ? c - 3 : c;
+	int idx = ch->voice;
+	int i, atten, alg, mask;
+	const uint8_t *v;
+	if (ch->ssg || idx < 0 || idx >= 32 || !s->voice_ok[idx])
+		return;
+	v = s->voices[idx];
+	atten = eikan_atten(ch);
+	alg = v[24] & 7;
+	mask = k_eikan_carriers[alg];
+	for (i = 0; i < 4; ++i) {
+		if (!(mask & (1 << i)))
+			continue;
+		int val = v[4 + i] + atten;
+		if (val > 127) val = 127;
+		/* i=0..3 → regs 40,44,48,4C (+slot) = Op1,Op3,Op2,Op4 */
+		wrx(s, ext, (uint8_t)(0x40 + slot + i * 4), (uint8_t)val);
+	}
+}
 
 static void apply_voice(ntl_state *s, int c, int idx, int vol)
 {
@@ -158,13 +190,15 @@ static void apply_voice(ntl_state *s, int c, int idx, int vol)
 		return;
 	}
 	v = s->voices[idx];
-	/* Eikan 8F: 0 = loudest, 15 = quietest (opposite of Sekigahara scale). */
-	atten = (vol & 15) * 4;
+	/* Eikan: 8F/83 sum added 1:1 to carrier TL (0 = loudest). */
+	atten = vol;
+	if (atten < 0) atten = 0;
+	if (atten > 127) atten = 127;
 	alg = v[24] & 7;
 	mask = k_eikan_carriers[alg];
 	for (i = 0; i < 24; ++i) {
 		int val = v[i];
-		/* bytes 4..7 = TL for ops 0..3 */
+		/* bytes 4..7 = TL for ops 0..3 (Op1,Op3,Op2,Op4) */
 		if (i >= 4 && i < 8 && (mask & (1 << (i - 4)))) {
 			val += atten;
 			if (val > 127) val = 127;
@@ -212,7 +246,11 @@ static void play_note(ntl_state *s, int c, int name, int dry)
 		ssgc = c >= 6 ? c - 6 : 0;
 		wr(s, (uint8_t)(ssgc * 2), (uint8_t)per);
 		wr(s, (uint8_t)(ssgc * 2 + 1), (uint8_t)(per >> 8));
-		wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(ch->vol & 15));
+		{
+			int lvl = s->eikan ? (eikan_atten(ch) >> 3) : (ch->vol & 15);
+			if (s->eikan) lvl = 15 - lvl;
+			wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(lvl & 15));
+		}
 		s->ssg_mix &= (uint8_t)~(1 << ssgc);
 		wr(s, 0x07, s->ssg_mix);
 		ch->keyed = 1;
@@ -262,15 +300,18 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 			return;
 		case 0x82:
 			return; /* slur marker; lookahead at irq keyoff */
-		case 0x83:
-			if (fetchb(s, ch, &a))
-				ch->detune = (int)a - 0x20;
+		case 0x83: /* expression / soft-volume → [di+0xb]; NOT detune */
+			if (fetchb(s, ch, &a)) {
+				ch->vol_b = a & 0x7F;
+				if (!dry && !ch->ssg)
+					apply_eikan_tl(s, c);
+			}
 			return;
 		case 0x84: /* instrument program (not volume!) */
 			if (fetchb(s, ch, &a)) {
 				ch->voice = a & 31;
 				if (!dry && !ch->ssg)
-					apply_voice(s, c, ch->voice, ch->vol);
+					apply_voice(s, c, ch->voice, eikan_atten(ch));
 			}
 			return;
 		case 0x85:
@@ -347,11 +388,17 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 			}
 			return;
 		}
-		case 0x8F: /* volume 0..15; re-apply current voice with new TL */
+		case 0x8F: /* main volume → [di+0xa]; 0=loudest, added 1:1 to carrier TL */
 			if (fetchb(s, ch, &a)) {
-				ch->vol = a & 15;
+				ch->vol = a & 0x7F;
 				if (!dry && !ch->ssg)
-					apply_voice(s, c, ch->voice, ch->vol);
+					apply_eikan_tl(s, c);
+				else if (!dry && ch->ssg) {
+					/* SSG: (vol_a+vol_b)>>3 inverted → level 0..15 */
+					int lvl = eikan_atten(ch) >> 3;
+					int ssgc = c >= 6 ? c - 6 : 0;
+					wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(15 - lvl));
+				}
 			}
 			return;
 		case 0x90: {
@@ -721,14 +768,15 @@ static void reset_play(ntl_state *s, int dry)
 		s->ch[i].end = s->part_end[i];
 		s->ch[i].wait = 1;
 		s->ch[i].oct = 4;
-		s->ch[i].vol = 10;
+		s->ch[i].vol = s->eikan ? 0 : 10; /* Eikan 8F: 0=loudest */
+		s->ch[i].vol_b = 0;
 		s->ch[i].def_len = s->eikan ? 0x30 : 12;
 		s->ch[i].gate = 0;
 		s->ch[i].eff = 0;
 		s->ch[i].voice = 0;
 		if (!s->ch[i].ssg && !s->ch[i].conductor && !dry) {
 			if (s->eikan)
-				apply_voice(s, i, s->ch[i].voice, s->ch[i].vol);
+				apply_voice(s, i, s->ch[i].voice, eikan_atten(&s->ch[i]));
 			else
 				apply_def(s, i, s->ch[i].vol);
 		}

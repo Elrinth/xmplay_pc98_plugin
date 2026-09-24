@@ -1,9 +1,25 @@
-# xmp-pc98 1.0.33
+# xmp-pc98 1.0.34
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.33.0**; `PLUGIN_XMPVER` **1003300**.
+VERSIONINFO **1.0.34.0**; `PLUGIN_XMPVER` **1003400**.
+
+## 1.0.34
+
+- **Eikan soft attacks / “fading hardness”**: opcode `0x83` is **expression
+  volume** (`[di+0x0B]`), not detune. Live driver does
+  `carrier_TL = voice_TL + vol_8F + vol_83` (1:1, not `×4`). Plugin was
+  treating `0x83` as F-number detune (`a-0x20`), so expression ramps bent
+  pitch instead of opening/closing carriers — dull attacks and wandering
+  tuning on many songs.
+- Volume scale: `0x8F` attenuation is raw 0..127 added to carrier TL (was
+  `(vol&15)*4`).
+- Mid-note `0x83`/`0x8F` only rewrite carrier TLs (no full voice reload).
+- Song 2 “detune” was the same `0x83` bug; FNUM table already matched live
+  (`0x26A`…). Real detune remains `0x91` (signed add to pitch word).
+- User HW song-1 spectral centroid ~3373 Hz; plugin 1.0.33 ~715 Hz; 1.0.34
+  ~3312 Hz.
 
 ## 1.0.33
 
@@ -38,5 +54,5 @@ Copy `xmp-pc98.dll` next to `xmplay.exe`.
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # → dist/xmp-pc98-1.0.33.zip (DLL + README + LICENSE)
+/usr/bin/make pack   # → dist/xmp-pc98-1.0.34.zip (DLL + README + LICENSE)
 ```
