@@ -233,7 +233,7 @@ static inline int pc98_looks_ntl_any(const uint8_t *d, size_t n)
 	if (!d || n < 16 || d[0] != 0) return 0;
 	sz = (unsigned)d[1] | ((unsigned)d[2] << 8);
 	cnt = d[3];
-	if (cnt < 4 || cnt > 48) return 0;
+	if (cnt < 3 || cnt > 64) return 0;
 	if (sz < 16 + cnt * 3) return 0;
 	/* Full file: declared size must match. CheckFile peeks 256 bytes. */
 	if (n >= sz && n != sz) return 0;

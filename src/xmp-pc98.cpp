@@ -298,7 +298,7 @@ static void WINAPI pc_About(HWND win)
 		"S98 (cisc fmgen, same core as in_s98), PMD (pmdmini / PMDWin),\r\n"
 		"FMP (optional WinFMP.dll), BGMDRV .MUS, Packen NA .O, Melody\r\n"
 		"MFD/USO, N3G .MDT, Synthia .PAI, MBMUS .MSB, OPNDRV .MD,\r\n"
-		"ArtDink .NTL (F_* FM, G_* GM/SF2), Kajihara MMD.COM .MMD (GS/SC-55 SF2), FUGA packed .GMD/.MMD (SC-55 / CM-64 SF2),\r\n"
+		"ArtDink .NTL (F_* FM, G_* GM/SF2) and MUSIC.PAC (Eikan 3 multi-song), Kajihara MMD.COM .MMD (GS/SC-55 SF2), FUGA packed .GMD/.MMD (SC-55 / CM-64 SF2),\r\n"
 		"and Hoot sets via hootrip.\r\n\r\n"
 		"This is NOT a wrap of S98Amp / in_s98.dll, in_fmpmd.dll, or ZXTune.\r\n"
 		"Delete or disable S98Amp, in_fmpmd, and ZXTune's S98/.M claims\r\n"
@@ -306,7 +306,7 @@ static void WINAPI pc_About(HWND win)
 		"We do not claim .vgm/.vgz (xmp-gamemusic) or .sap (xmp-pokey).\r\n"
 		"We do not claim .mid (XMPlay MIDI), .mml source, or .com/.exe.\r\n\r\n"
 		"CheckFile probes a 256-byte peek (S98, PMD/FMP/BGMDRV/NA/USO/MDT/PAI,\r\n"
-		"MSB/MD/NTL/GMD, set.pc98). G_*.NTL is GM (SF2), not OPNA. .O is claimed only if it looks like Packen NA, not\r\n"
+		"MSB/MD/NTL/PAC/GMD, set.pc98). G_*.NTL is GM (SF2), not OPNA. .PAC only if ArtDink size-table. .O is claimed only if it looks like Packen NA, not\r\n"
 		"as a generic object file. Playlist length is measured one loop.\r\n"
 		"S98 mixes at 55466 Hz through cisc fmgen (VolumeFM=0, SSG -18\r\n"
 		"on PC-9801 / -8 on PC-8801), then interpolates to XMPlay.\r\n\r\n"
@@ -969,7 +969,7 @@ static void WINAPI pc_SetConfig(void *config, DWORD size)
 }
 
 static const char g_exts[] =
-	"PC-98 / S98\0s98/m/m2/ms/mp/mz/opi/ovi/ozi/fmd/mmd/gmd/mus/uso/o/mdt/msb/ntl/md/pc98";
+	"PC-98 / S98\0s98/m/m2/ms/mp/mz/opi/ovi/ozi/fmd/mmd/gmd/mus/uso/o/mdt/msb/ntl/pac/md/pc98";
 
 static XMPIN g_xmpin = {
 	XMPIN_FLAG_CONFIG | XMPIN_FLAG_OPTIONS,

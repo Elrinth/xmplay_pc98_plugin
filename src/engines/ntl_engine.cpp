@@ -259,6 +259,9 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 	case 0x9D:
 		return;
 	default:
+		/* Skip one arg for unknown 0x80–0xBF so streams stay aligned. */
+		if (cmd >= 0x80 && cmd < 0xC0)
+			fetchb(s, ch, &a);
 		return;
 	}
 }
@@ -438,8 +441,17 @@ static int measure_ms(ntl_state *s)
 	int64_t us = 0;
 	reset_play(s, 1);
 	while (!s->ended && ticks < NTL_MAX_TICKS) {
+		int i, live = 0, looped = 0, en = 0;
 		us += (int64_t)tb_clocks(s->tb);
 		irq(s, 1, 1);
+		for (i = 0; i < NTL_CH; ++i) {
+			if (!s->ch[i].enabled) continue;
+			en++;
+			if (!s->ch[i].ended) live++;
+			if (s->ch[i].did_loop) looped++;
+		}
+		if (en > 0 && looped >= en) s->ended = 1;
+		if (!live) s->ended = 1;
 		ticks++;
 	}
 	{
