@@ -1,7 +1,7 @@
 /*
  * MsDRV 4.x light (.MS) — KENJI (KAKERA).
  * Spec: MST4_5A + ValleyBell MsDRV_SeqFormat.
- * Ekudorado: _N OPN, _B2 OPNA, _GS/_88 MIDI GS, _SB OPL3 (silent).
+ * Ekudorado: _N OPN, _B2 OPNA, _GS/_88 MIDI GS (SC-88), _SB OPL3.
  * Banks: sibling {prefix}.OPN / {prefix}.SSG (48-byte / 16-byte programs).
  */
 #include "msdrv_engine.h"
@@ -22,7 +22,9 @@
 
 #define MS_TRK       36
 #define MS_HDR       0xA0
-#define MS_CLOCK     7987200u
+#define MS_CLOCK_OPNA 7987200u
+#define MS_CLOCK_OPN  3993600u
+#define MS_CLOCK     MS_CLOCK_OPNA
 #define MS_MAX_TICKS 800000
 #define MS_NEST      8
 #define MS_OPN_N     256
@@ -76,6 +78,13 @@ struct ms_state {
 	int mute_fm, mute_ssg, mute_rhythm;
 	int64_t chip_pos, chip_step, tick_acc;
 	int last_l, last_r;
+	int prev_l, prev_r;          /* linear-resample history */
+	uint32_t chip_clock;         /* YM2203 3.9936M or YM2608 7.9872M */
+	int skip_audio;              /* seek: advance seq+regs, skip generate */
+	uint8_t sh_opn[2][256];
+	uint8_t sh_opn_set[2][256];
+	uint8_t sh_opl[2][256];
+	uint8_t sh_opl_set[2][256];
 	/* Fixed-quantum TSF FIFO so host chunk size cannot change float order. */
 	float tsf_fifo[64 * 2];
 	int tsf_fifo_pos, tsf_fifo_len;
@@ -91,11 +100,14 @@ struct ms_state {
 		  one_loop_ms(0), ended(0), song_ended(0), tempo(120), timebase(48),
 		  tempo_mod(0x40), mute_fm(0), mute_ssg(0), mute_rhythm(0),
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
+		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), skip_audio(0),
 		  tsf_fifo_pos(0), tsf_fifo_len(0),
 		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
 		memset(trk, 0, sizeof trk);
+		memset(sh_opn_set, 0, sizeof sh_opn_set);
+		memset(sh_opl_set, 0, sizeof sh_opl_set);
 		title[0] = 0;
 	}
 };
@@ -160,17 +172,18 @@ static int hw_of(int id, int kind)
 	return 0;
 }
 
-static void wr(ms_state *s, uint8_t aa, uint8_t dd)
-{
-	if (!s->opna) return;
-	s->opna->write(0, aa);
-	s->opna->write(1, dd);
-}
 static void wrx(ms_state *s, int ext, uint8_t aa, uint8_t dd)
 {
-	if (!s->opna) return;
+	int p = ext ? 1 : 0;
+	s->sh_opn[p][aa] = dd;
+	s->sh_opn_set[p][aa] = 1;
+	if (!s->opna || s->skip_audio) return;
 	if (ext) { s->opna->write(2, aa); s->opna->write(3, dd); }
 	else { s->opna->write(0, aa); s->opna->write(1, dd); }
+}
+static void wr(ms_state *s, uint8_t aa, uint8_t dd)
+{
+	wrx(s, 0, aa, dd);
 }
 
 static void apply_fm(ms_state *s, ms_trk *t)
@@ -227,8 +240,11 @@ static void fm_on(ms_state *s, ms_trk *t, int note)
 	if (fnote < 0) fnote = 0;
 	if (fnote > 127) fnote = 127;
 	n = fnote % 12;
-	blk = fnote / 12;
-	if (blk < 1) blk = 1;
+	/* k_fnum is calibrated for ~4 MHz (26K YM2203). Hardware:
+	 * Fout = clock/144 * FNUM * 2^(BLOCK-1) / 2^20.
+	 * OPN @ 3.9936 MHz → BLOCK = note/12 - 1; OPNA @ 7.9872 MHz → note/12 - 2. */
+	blk = fnote / 12 - (s->variant == 0 ? 1 : 2);
+	if (blk < 0) blk = 0;
 	if (blk > 7) blk = 7;
 	fn = k_fnum[n] + t->detune;
 	if (fn < 0) fn = 0;
@@ -258,7 +274,12 @@ static void ssg_on(ms_state *s, ms_trk *t, int note)
 	if (fnote < 0) fnote = 0;
 	if (fnote > 127) fnote = 127;
 	freq = 440.0 * pow(2.0, (fnote - 69) / 12.0);
-	period = (MS_CLOCK / 2.0) / (16.0 * freq);
+	/* YM2608 SSG runs at master/2; YM2203 SSG at master. Both yield ~4 MHz. */
+	{
+		double ssg_clk = (s->variant == 0) ? (double)s->chip_clock
+						   : ((double)s->chip_clock / 2.0);
+		period = ssg_clk / (16.0 * freq);
+	}
 	per = (int)(period + 0.5) + t->detune;
 	if (per < 1) per = 1;
 	if (per > 0xFFF) per = 0xFFF;
@@ -276,7 +297,10 @@ static void ssg_on(ms_state *s, ms_trk *t, int note)
 
 static void opl_wr(ms_state *s, int port, uint8_t reg, uint8_t val)
 {
-	if (!s->opl) return;
+	int p = port ? 1 : 0;
+	s->sh_opl[p][reg] = val;
+	s->sh_opl_set[p][reg] = 1;
+	if (!s->opl || s->skip_audio) return;
 	s->opl->write((uint32_t)(port ? 2 : 0), reg);
 	s->opl->write((uint32_t)(port ? 3 : 1), val);
 }
@@ -324,30 +348,36 @@ static void apply_opl(ms_state *s, ms_trk *t)
 	ch = t->hw % 9;
 	sm = k_opl_slot[ch];
 	sc = sm + 3;
-	fb_cnt = (uint8_t)(((v[0] & 0x38) >> 0) | (v[0] & 0x01));
-	/* LR both on for stereo OPL3 */
+	/* MST: fb in D5..D3, cnt in D0. OPL 0xC0 wants FB in D3..D1, CNT in D0,
+	 * plus stereo enables in D5..D4 for OPL3. */
+	fb_cnt = (uint8_t)((((v[0] & 0x38) >> 2) & 0x0E) | (v[0] & 0x01));
 	pan = 0x30;
-	opl_wr(s, port, (uint8_t)(0xC0 + ch), (uint8_t)(pan | (fb_cnt & 0x0F)));
+	opl_wr(s, port, (uint8_t)(0xC0 + ch), (uint8_t)(pan | fb_cnt));
 	for (i = 0; i < 2; i++) {
 		int slot = i ? sc : sm;
 		int o = i; /* op1 / op2 in file */
 		uint8_t mult = v[1 + o] & 0x0F;
-		uint8_t tl = v[5 + o] & 0x3F;
+		/* MST packs TL in D6..D1 (D0 unused) — shift into OPL's 6-bit TL. */
+		uint8_t tl = (uint8_t)((v[5 + o] >> 1) & 0x3F);
 		uint8_t ks_ar = v[9 + o];
 		uint8_t am_dr = v[0x0D + o];
 		uint8_t vib_ws = v[0x11 + o];
 		uint8_t sl_rr = v[0x15 + o];
-		uint8_t r20 = (uint8_t)(((am_dr & 0x80)) | ((vib_ws & 0x40) ? 0x40 : 0) |
-			((vib_ws & 0x20) ? 0x20 : 0) | ((vib_ws & 0x10) ? 0x10 : 0) | mult);
-		/* Scale carrier TL by track volume (0..127 → add up to 0x3F). */
+		/* File: vib@D5 egt@D4 ksr@D3 ws@D2..0 → OPL 0x20: AM VIB EGT KSR MULT */
+		uint8_t r20 = (uint8_t)((am_dr & 0x80) |
+			((vib_ws & 0x20) ? 0x40 : 0) |
+			((vib_ws & 0x10) ? 0x20 : 0) |
+			((vib_ws & 0x08) ? 0x10 : 0) | mult);
+		/* Volume: attenuate carrier (op2) only; keep some headroom. */
 		vol_tl = tl;
 		if (i == 1) {
-			int add = (127 - (t->vol & 127)) * 63 / 127;
+			int add = (127 - (t->vol & 127)) * 48 / 127;
 			vol_tl = tl + add;
 			if (vol_tl > 0x3F) vol_tl = 0x3F;
 		}
-		uint8_t r40 = (uint8_t)(((ks_ar & 0xC0)) | (vol_tl & 0x3F));
-		uint8_t r60 = (uint8_t)(((ks_ar & 0x0F) << 4) | (am_dr & 0x0F));
+		uint8_t r40 = (uint8_t)((ks_ar & 0xC0) | (vol_tl & 0x3F));
+		/* AR in D4..D1 of ks_ar; DR in D4..D1 of am_dr (D0 unused each). */
+		uint8_t r60 = (uint8_t)((((ks_ar >> 1) & 0x0F) << 4) | ((am_dr >> 1) & 0x0F));
 		uint8_t r80 = sl_rr;
 		uint8_t rE0 = (uint8_t)(vib_ws & 0x07);
 		opl_wr(s, port, (uint8_t)(0x20 + slot), r20);
@@ -379,13 +409,13 @@ static void opl_on(ms_state *s, ms_trk *t, int note)
 	ch = t->hw % 9;
 	fnote = note + (t->pb / 256);
 	if (fnote < 0) fnote = 0;
-	if (fnote > 95) fnote = 95;
-	/* OPL3: fnum = freq * 2^(20 - block) / (clock/288) */
-	block = fnote / 12;
+	if (fnote > 127) fnote = 127;
+	/* OPL3: Fnum = freq * 2^(20-block) / (clock/288). block ≈ note/12 - 1. */
+	block = fnote / 12 - 1;
 	if (block < 0) block = 0;
 	if (block > 7) block = 7;
 	freq = 440.0 * pow(2.0, (fnote - 69) / 12.0);
-	fnum = (int)(freq * (1 << (20 - block)) / (MS_OPL_CLOCK / 288.0) + 0.5);
+	fnum = (int)(freq * (double)(1 << (20 - block)) / (MS_OPL_CLOCK / 288.0) + 0.5);
 	if (fnum < 0) fnum = 0;
 	if (fnum > 0x3FF) fnum = 0x3FF;
 	opl_wr(s, port, (uint8_t)(0xA0 + ch), (uint8_t)(fnum & 0xFF));
@@ -398,7 +428,8 @@ static void opl_on(ms_state *s, ms_trk *t, int note)
 static void midi_off(ms_state *s, ms_trk *t)
 {
 	if (!s->sf || t->kind != CK_MIDI || !t->keyed) return;
-	tsf_channel_note_off(s->sf, t->hw, t->cur_note);
+	if (!s->skip_audio)
+		tsf_channel_note_off(s->sf, t->hw, t->cur_note);
 	t->keyed = 0;
 }
 static void midi_on(ms_state *s, ms_trk *t, int note, int vel)
@@ -407,7 +438,8 @@ static void midi_on(ms_state *s, ms_trk *t, int note, int vel)
 	if (t->keyed) midi_off(s, t);
 	if (vel <= 0) vel = t->vol;
 	if (vel <= 0) return;
-	tsf_channel_note_on(s->sf, t->hw, note & 127, (vel & 0x7F) / 127.f);
+	if (!s->skip_audio)
+		tsf_channel_note_on(s->sf, t->hw, note & 127, (vel & 0x7F) / 127.f);
 	t->keyed = 1;
 	t->cur_note = note & 127;
 }
@@ -506,7 +538,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 		t->inst = d[pc + 1];
 		if (!dry && t->kind == CK_FM) apply_fm(s, t);
 		if (!dry && t->kind == CK_OPL) apply_opl(s, t);
-		if (!dry && t->kind == CK_MIDI && s->sf)
+		if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf)
 			tsf_channel_set_presetnumber(s->sf, t->hw, t->inst & 127, t->hw == 9);
 		t->pc = pc + 2; break;
 	case 0x83: {
@@ -530,7 +562,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 	case 0x85:
 		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
 		t->vol = d[pc + 1] & 0x7F;
-		if (!dry && t->kind == CK_MIDI && s->sf)
+		if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf)
 			tsf_channel_midi_control(s->sf, t->hw, 7, t->vol);
 		if (!dry && t->keyed && t->kind == CK_FM) apply_fm(s, t);
 		if (!dry && t->keyed && t->kind == CK_SSG) {
@@ -587,7 +619,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 	case 0x9F:
 		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
 		t->pan = d[pc + 1];
-		if (!dry && t->kind == CK_MIDI && s->sf)
+		if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf)
 			tsf_channel_midi_control(s->sf, t->hw, 10, ((t->pan + 0x80) & 0xFF) >> 1);
 		t->pc = pc + 2; break;
 	case 0xA4:
@@ -632,7 +664,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 		t->ch_id = id;
 		t->kind = kind_of(id);
 		t->hw = hw_of(id, t->kind);
-		if (!dry && t->kind == CK_MIDI && s->sf) {
+		if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf) {
 			tsf_channel_set_presetnumber(s->sf, t->hw, t->inst & 127, t->hw == 9);
 			tsf_channel_midi_control(s->sf, t->hw, 7, t->vol ? t->vol : 100);
 		}
@@ -643,7 +675,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 		if ((size_t)pc + 3 <= n) {
 			t->wait = d[pc + 1];
 			t->inst = d[pc + 2];
-			if (!dry && t->kind == CK_MIDI && s->sf)
+			if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf)
 				tsf_channel_set_presetnumber(s->sf, t->hw, t->inst & 127, t->hw == 9);
 		}
 		t->pc = pc + 3; break;
@@ -698,6 +730,76 @@ static void reset_trks(ms_state *s)
 		s->trk[i].pan = 3;
 		s->trk[i].ch_id = 0xFF;
 	}
+}
+
+static void clear_shadow(ms_state *s)
+{
+	memset(s->sh_opn_set, 0, sizeof s->sh_opn_set);
+	memset(s->sh_opl_set, 0, sizeof s->sh_opl_set);
+}
+
+/* After a register-only seek: reset chip, replay shadowed regs (skip key strobes),
+ * then re-key channels that the sequencer still has held. */
+static void commit_shadow(ms_state *s)
+{
+	int p, a, i;
+	int was_skip = s->skip_audio;
+	s->skip_audio = 0;
+	if (s->opna) {
+		s->opna->reset();
+		/* Base init (also lands in shadow). */
+		wr(s, 0x29, 0x80);
+		wr(s, 0x07, 0x38);
+		wr(s, 0x11, 0x3F);
+		for (p = 0; p < 2; p++) {
+			for (a = 0; a < 256; a++) {
+				if (!s->sh_opn_set[p][a]) continue;
+				if (p == 0 && a == 0x28) continue; /* key-on strobe */
+				if (p == 0) {
+					s->opna->write(0, (uint8_t)a);
+					s->opna->write(1, s->sh_opn[p][a]);
+				} else {
+					s->opna->write(2, (uint8_t)a);
+					s->opna->write(3, s->sh_opn[p][a]);
+				}
+			}
+		}
+		for (i = 0; i < MS_TRK; i++) {
+			ms_trk *tr = &s->trk[i];
+			if (!tr->keyed) continue;
+			if (tr->kind == CK_FM) {
+				tr->keyed = 0;
+				fm_on(s, tr, tr->cur_note);
+			} else if (tr->kind == CK_SSG) {
+				tr->keyed = 0;
+				ssg_on(s, tr, tr->cur_note);
+			}
+		}
+	}
+	if (s->opl) {
+		s->opl->reset();
+		opl_wr(s, 1, 0x05, 0x01);
+		opl_wr(s, 0, 0x01, 0x20);
+		opl_wr(s, 0, 0x08, 0x00);
+		for (p = 0; p < 2; p++) {
+			for (a = 0; a < 256; a++) {
+				if (!s->sh_opl_set[p][a]) continue;
+				if ((a & 0xF0) == 0xB0) continue; /* key bit in B0 */
+				s->opl->write((uint32_t)(p ? 2 : 0), (uint8_t)a);
+				s->opl->write((uint32_t)(p ? 3 : 1), s->sh_opl[p][a]);
+			}
+		}
+		for (i = 0; i < MS_TRK; i++) {
+			ms_trk *tr = &s->trk[i];
+			if (tr->kind == CK_OPL && tr->keyed) {
+				tr->keyed = 0;
+				opl_on(s, tr, tr->cur_note);
+			}
+		}
+	}
+	s->skip_audio = was_skip;
+	s->prev_l = s->prev_r = s->last_l = s->last_r = 0;
+	s->chip_pos = 0;
 }
 
 static void reset_chip(ms_state *s)
@@ -851,13 +953,17 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		s->opl = new ymfm::ymf262(s->iface);
 		sr = s->opl->sample_rate(MS_OPL_CLOCK);
 		if (sr == 0) sr = 49716;
+		s->chip_clock = MS_OPL_CLOCK;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_opl(s);
 	} else {
 		uint32_t sr;
+		/* _N = PC-9801-26 YM2203 @ 3.9936 MHz; _B2 = 86 board YM2608 @ 7.9872 MHz.
+		 * We still use ym2608 for both (3 FM + SSG) but clock the chip correctly. */
+		s->chip_clock = (s->variant == 0) ? MS_CLOCK_OPN : MS_CLOCK_OPNA;
 		s->opna = new ymfm::ym2608(s->iface);
-		sr = s->opna->sample_rate(MS_CLOCK);
-		if (sr == 0) sr = 55467;
+		sr = s->opna->sample_rate(s->chip_clock);
+		if (sr == 0) sr = (s->variant == 0) ? 27733 : 55467;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_chip(s);
 	}
@@ -947,8 +1053,12 @@ int msdrv_process_h(void *h, float *buf, int count)
 {
 	ms_state *s = (ms_state *)h;
 	int done = 0;
-	if (!s || !buf || count <= 0) return 0;
-	memset(buf, 0, (size_t)count * 2 * sizeof(float));
+	if (!s || count <= 0) return 0;
+	/* Seek fast-forward may pass a small discard buffer; skip_audio never writes buf. */
+	if (!s->skip_audio) {
+		if (!buf) return 0;
+		memset(buf, 0, (size_t)count * 2 * sizeof(float));
+	}
 	while (done < count) {
 		int tps, i, room;
 		if (s->play_limit && s->play_samples >= s->play_limit)
@@ -976,6 +1086,19 @@ int msdrv_process_h(void *h, float *buf, int count)
 		/* Emit one host sample (or a short burst for chip paths). For TSF we
 		 * refill a fixed 64-sample FIFO that never extends past the next tick,
 		 * so any host buffer size yields the same float stream. */
+		if (s->skip_audio) {
+			/* Seek fast-forward: advance sequencer time without chip/TSF audio. */
+			int chunk = (int)(((int64_t)s->rate - s->tick_acc + tps - 1) / tps);
+			if (chunk < 1) chunk = 1;
+			if (chunk > room) chunk = room;
+			/* Cap jumps so we still service ticks often enough. */
+			if (chunk > 4096) chunk = 4096;
+			s->tick_acc += (int64_t)chunk * tps;
+			s->play_samples += (uint32_t)chunk;
+			done += chunk;
+			continue;
+		}
+
 		if (s->sf) {
 			int emitted = 0;
 			while (emitted < room) {
@@ -1008,7 +1131,6 @@ int msdrv_process_h(void *h, float *buf, int count)
 				}
 				emitted += take;
 			}
-			/* Clamp */
 			for (i = 0; i < emitted; i++) {
 				float L = buf[(done + i) * 2], R = buf[(done + i) * 2 + 1];
 				if (L > 1) L = 1; if (L < -1) L = -1;
@@ -1019,16 +1141,18 @@ int msdrv_process_h(void *h, float *buf, int count)
 			continue;
 		}
 
-		/* FM / OPL path: render up to next tick in one go (deterministic). */
+		/* FM / OPL: linear resample from chip rate; SSG -18 dB; overall ×0.5. */
 		{
 			int chunk = (int)(((int64_t)s->rate - s->tick_acc + tps - 1) / tps);
 			if (chunk < 1) chunk = 1;
 			if (chunk > room) chunk = room;
 			if (s->opna || s->opl) {
 				for (i = 0; i < chunk; i++) {
-					float L, R;
+					float L, R, frac, mix_l, mix_r;
 					s->chip_pos += s->chip_step;
 					while (s->chip_pos >= 0x10000) {
+						s->prev_l = s->last_l;
+						s->prev_r = s->last_r;
 						if (s->opna) {
 							int fm_l, fm_r, ssg;
 							s->opna->generate(&s->out);
@@ -1037,6 +1161,8 @@ int msdrv_process_h(void *h, float *buf, int count)
 							ssg = s->out.data[2];
 							if (s->mute_fm) { fm_l = 0; fm_r = 0; }
 							if (s->mute_ssg) ssg = 0;
+							/* S98 PC-9801: SSG ≈ -18 dB vs FM; PMD also halves mix. */
+							ssg = ssg / 8;
 							s->last_l = fm_l + ssg;
 							s->last_r = fm_r + ssg;
 						} else {
@@ -1046,17 +1172,24 @@ int msdrv_process_h(void *h, float *buf, int count)
 						}
 						s->chip_pos -= 0x10000;
 					}
-					L = s->last_l / 32768.f;
-					R = s->last_r / 32768.f;
-					if (L > 1) L = 1; if (L < -1) L = -1;
-					if (R > 1) R = 1; if (R < -1) R = -1;
+					frac = (float)s->chip_pos / 65536.f;
+					mix_l = s->prev_l + (s->last_l - s->prev_l) * frac;
+					mix_r = s->prev_r + (s->last_r - s->prev_r) * frac;
+					L = mix_l * (0.5f / 32768.f);
+					R = mix_r * (0.5f / 32768.f);
+					/* Soft clip — hard clip was a crackle source when peaking ~1.0. */
+					if (L > 1.f) L = 1.f + (L - 1.f) * 0.1f;
+					if (L < -1.f) L = -1.f + (L + 1.f) * 0.1f;
+					if (R > 1.f) R = 1.f + (R - 1.f) * 0.1f;
+					if (R < -1.f) R = -1.f + (R + 1.f) * 0.1f;
+					if (L > 1.f) L = 1.f; if (L < -1.f) L = -1.f;
+					if (R > 1.f) R = 1.f; if (R < -1.f) R = -1.f;
 					buf[(done + i) * 2] = L;
 					buf[(done + i) * 2 + 1] = R;
 					s->tick_acc += tps;
 					s->play_samples++;
 				}
 			} else {
-				/* silence */
 				for (i = 0; i < chunk; i++) {
 					s->tick_acc += tps;
 					s->play_samples++;
@@ -1071,26 +1204,64 @@ int msdrv_process_h(void *h, float *buf, int count)
 int msdrv_seek_ms_h(void *h, int ms)
 {
 	ms_state *s = (ms_state *)h;
-	uint32_t target;
+	uint32_t target, settle, pre;
 	float discard[512 * 2];
+	int i;
 	if (!s) return -1;
 	if (ms < 0) ms = 0;
 	reset_trks(s);
+	clear_shadow(s);
 	if (s->opna) reset_chip(s);
 	if (s->opl) reset_opl(s);
 	if (s->sf) {
+		int c;
 		tsf_note_off_all(s->sf);
 		tsf_reset(s->sf);
 		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
+		for (c = 0; c < 16; c++) {
+			tsf_channel_set_presetnumber(s->sf, c, 0, c == 9);
+			tsf_channel_midi_control(s->sf, c, 7, 100);
+			tsf_channel_midi_control(s->sf, c, 11, 127);
+			tsf_channel_midi_control(s->sf, c, 10, 64);
+		}
 	}
 	s->play_samples = 0;
 	s->tick_acc = 0;
 	s->chip_pos = 0;
+	s->prev_l = s->prev_r = s->last_l = s->last_r = 0;
 	s->tsf_fifo_pos = 0;
 	s->tsf_fifo_len = 0;
 	target = (uint32_t)(((int64_t)ms * s->rate) / 1000);
-	/* Soft-render (discard) so chip envelopes and TSF voices match a linear play
-	 * to the same time — tick-only seek left envelopes at attack = audible seek glitch. */
+	/* ~50 ms settle after register-only fast-forward. */
+	settle = (uint32_t)(s->rate / 20);
+	if (settle > target) settle = target;
+	pre = target - settle;
+
+	s->skip_audio = 1;
+	while (s->play_samples < pre && !s->ended) {
+		int n = (int)(pre - s->play_samples);
+		if (n > 8192) n = 8192;
+		msdrv_process_h(s, NULL, n);
+	}
+	s->skip_audio = 0;
+
+	if (s->opna || s->opl)
+		commit_shadow(s);
+
+	if (s->sf) {
+		/* Controllers/programs already applied during skip; re-trigger held notes. */
+		tsf_note_off_all(s->sf);
+		for (i = 0; i < MS_TRK; i++) {
+			ms_trk *tr = &s->trk[i];
+			if (tr->kind == CK_MIDI && tr->keyed && s->sf) {
+				tsf_channel_set_presetnumber(s->sf, tr->hw, tr->inst & 127, tr->hw == 9);
+				tsf_channel_midi_control(s->sf, tr->hw, 7, tr->vol ? tr->vol : 100);
+				tsf_channel_note_on(s->sf, tr->hw, tr->cur_note & 127,
+					(tr->vol & 0x7F) / 127.f);
+			}
+		}
+	}
+
 	while (s->play_samples < target && !s->ended) {
 		int n = (int)(target - s->play_samples);
 		if (n > 512) n = 512;

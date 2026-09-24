@@ -1,4 +1,4 @@
-# xmp-pc98 1.0.20
+# xmp-pc98 1.0.21
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
@@ -7,7 +7,18 @@ This is **not** a wrap of S98Amp / `in_s98.dll`, `in_fmpmd.dll`, or ZXTune.
 Same rule as xmp-gamemusic (“does not wrap `in_nez.dll`”).
 
 Classic XMPlay is **32-bit only**. This DLL is PE32 i386.
-VERSIONINFO FILEVERSION is **1.0.20.0**; `PLUGIN_XMPVER` is **1002000**.
+VERSIONINFO FILEVERSION is **1.0.21.0**; `PLUGIN_XMPVER` is **1002100**.
+
+
+## 1.0.21
+
+MsDRV4 polish after 1.0.20 feedback (`EC_10_*`):
+
+- **OPNA `_B2` crackle:** mix scaled (~½ like PMD), SSG ≈ −18 dB, soft clip, linear resample from ymfm rate (was nearest/ZOH).
+- **OPN `_N` pitch:** chip clock 3.9936 MHz; F-num/block octave base corrected (`note/12−1` vs OPNA `note/12−2`).
+- **OPL3 `_SB`:** MST type=1 bit packing (TL/AR/DR >>1, vib/egt/ksr map), F-num block `note/12−1`, volume TL scaling.
+- **Seek:** register-shadow fast-forward + ~50 ms settle (no full soft-render); TSF re-triggers held notes. Seek to ~48 s ≈ 2 ms.
+- **`_88`:** confirmed Roland SC-88 (GS) path — same engine as `_GS`.
 
 ## Install
 
@@ -111,7 +122,7 @@ make          # tests + dll
 make test
 make dll
 make scan
-make pack     # dist/xmp-pc98-1.0.20.zip
+make pack     # dist/xmp-pc98-1.0.21.zip
 make fetch-xml
 ```
 
