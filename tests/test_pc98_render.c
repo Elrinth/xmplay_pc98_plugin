@@ -13,6 +13,7 @@
 #include "engines/ntl_engine.h"
 #include "engines/gntl_engine.h"
 #include "engines/fmd_engine.h"
+#include "engines/msdrv_engine.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -407,11 +408,76 @@ static void test_xmplay_peek(const char *path, pc98_kind want, const char *tag)
 	expect(pc98_probe(path, hdr, n) == want, tag);
 }
 
+
+static void test_msdrv(void)
+{
+	const char *samples[] = {
+		"/workspace/ekudorad/EC_01_N.MS",
+		"/workspace/ekudorad/EC_01_B2.MS",
+		"/workspace/ekudorad/EC_01_GS.ms",
+		"/workspace/ekudorad/EC_01_SB.ms",
+		NULL
+	};
+	int i;
+	for (i = 0; samples[i]; i++) {
+		FILE *fp;
+		uint8_t *data;
+		long sz;
+		pc98_info inf;
+		pc98_cfg cfg;
+		void *h;
+		float buf[4096];
+		int n, j;
+		double peak = 0;
+		fp = fopen(samples[i], "rb");
+		if (!fp) { printf("  msdrv %s skipped (missing)\n", samples[i]); continue; }
+		fseek(fp, 0, SEEK_END); sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+		data = (uint8_t *)malloc((size_t)sz);
+		fread(data, 1, (size_t)sz, fp); fclose(fp);
+		expect(msdrv_probe_mem(data, (size_t)sz), "msdrv probe");
+		expect(pc98_probe(samples[i], data, (size_t)sz) == PC98_KIND_MSDRV, "pc98 probe msdrv");
+		pc98_cfg_defaults(&cfg);
+		expect(msdrv_analyze_mem(samples[i], data, (size_t)sz, &cfg, &inf) == 0, "msdrv analyze");
+		expect(inf.one_loop_ms[0] > 500 && inf.one_loop_ms[0] < 180000, "msdrv loop length");
+		h = msdrv_open_mem(samples[i], data, (size_t)sz, &cfg);
+		expect(h != NULL, "msdrv open");
+		if (h) {
+			n = msdrv_process_h(h, buf, 2048);
+			expect(n == 2048, "msdrv process");
+			for (j = 0; j < n * 2; j++) {
+				double a = buf[j] < 0 ? -buf[j] : buf[j];
+				if (a > peak) peak = a;
+			}
+			/* FM variants must audibly render; GS/OPL may be silent without SF2/OPL. */
+			if (strstr(samples[i], "_N") || strstr(samples[i], "_B2"))
+				expect(peak > 0.01, "msdrv FM energy");
+			msdrv_close_h(h);
+			printf("  msdrv %s loop=%dms peak=%.3f ft=%s\n",
+				samples[i], inf.one_loop_ms[0], peak, inf.filetype);
+		}
+		free(data);
+	}
+	/* PMD must not steal MsDRV .MS */
+	{
+		uint8_t *data; long sz; FILE *fp;
+		fp = fopen("/workspace/ekudorad/EC_01_N.MS", "rb");
+		if (fp) {
+			fseek(fp, 0, SEEK_END); sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+			data = (uint8_t *)malloc((size_t)sz);
+			fread(data, 1, (size_t)sz, fp); fclose(fp);
+			expect(pmd_probe_mem(data, (size_t)sz) == 0, "PMD must not claim MsDRV MS");
+			free(data);
+		}
+	}
+}
+
+
 int main(void)
 {
 	pc98_cfg cfg;
 	pc98_cfg_defaults(&cfg);
 	test_rejects();
+	test_msdrv();
 	test_xmplay_peek("D:\\spel\\pc98\\pc98 music\\K\\kirisima_98\\KG03N.MSB",
 		PC98_KIND_MSB, "KG03N.MSB CheckFile peek");
 	test_xmplay_peek("D:\\spel\\pc98\\pc98 music\\K\\k_sekiga_98\\F_JINKEI.NTL",

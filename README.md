@@ -1,4 +1,4 @@
-# xmp-pc98 1.0.17
+# xmp-pc98 1.0.18
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
@@ -7,7 +7,7 @@ This is **not** a wrap of S98Amp / `in_s98.dll`, `in_fmpmd.dll`, or ZXTune.
 Same rule as xmp-gamemusic (“does not wrap `in_nez.dll`”).
 
 Classic XMPlay is **32-bit only**. This DLL is PE32 i386.
-VERSIONINFO FILEVERSION is **1.0.17.0**; `PLUGIN_XMPVER` is **1001700**.
+VERSIONINFO FILEVERSION is **1.0.18.0**; `PLUGIN_XMPVER` is **1001800**.
 
 ## Install
 
@@ -50,6 +50,7 @@ GetConfig / SetConfig blob).
 | **OPNDRV** `.MD` | ymfm (OPNA) | Oerstedia FM (`OERS_NNN.MD`). 3 FM + 3 SSG + 86-board rhythm (part 7, GM drum notes). Needs `2608_*.WAV` next to the DLL |
 | **FMD pack** `.GMD` `.MMD` | TinySoundFont + SF2 | FUGA XOR-A5 RCP ([Valley Bell](https://github.com/ValleyBell/MidiConverters)). `.GMD` = SC-55 GS; `.MMD` = CM-64 (CM-32L+CM-32P). Applies GS/MT reset, master volume, and reverb from RCP `DD`/`DE`/`DF`. Auto-finds `SC-55.sf2` / `MT32 GS 2.51.sf2` under XMPlay `midi soundfonts`. Config `gs_sf2` / `mt_sf2`. Not `.mid` |
 | **NTL** `.NTL` | ymfm (OPNA) / TSF | Sekigahara `F_*` is FM/SSG (default YM voice; bank is in `SEK2.EXE`). `G_*` is GM/MIDI via SC-55 SF2 (same folder as Oerstedia). CheckFile peeks 256 bytes |
+| **MsDRV** `.MS` | ymfm (OPN/OPNA) / TSF | KENJI MSDRV4 light. `_N`=OPN, `_B2`=OPNA, `_GS`/`_88`=GS (SC-55 SF2), `_SB`=OPL3 (silent). Sibling `{prefix}.OPN`/`.SSG`. Probe by header so PMD `.MS` stays PMD |
 | **`set.pc98`** | hootrip → cached `.s98` | Multi-track (`GetSubSongs`, Shift+arrows). Skip `演奏停止` / `[STOP]`. Native sidecars play without hootrip |
 
 A extracted [Hoot](http://dmpsoft.s17.xrea.com/hoot/) tree
@@ -110,7 +111,7 @@ make          # tests + dll
 make test
 make dll
 make scan
-make pack     # dist/xmp-pc98-1.0.17.zip
+make pack     # dist/xmp-pc98-1.0.18.zip
 make fetch-xml
 ```
 
@@ -125,6 +126,8 @@ Do not vendor or commit the music folder. Rhythm WAVs and Hoot XML are
 user-supplied or fetch-at-pack.
 
 ## Credits
+
+- MsDRV 4 — KENJI (KAKERA); light sequence notes — Valley Bell
 
 - XMPlay SDK — un4seen
 - S98 spec — Mamiya / Ru^3

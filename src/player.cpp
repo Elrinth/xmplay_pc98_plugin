@@ -14,6 +14,7 @@
 #include "engines/ntl_engine.h"
 #include "engines/gntl_engine.h"
 #include "engines/fmd_engine.h"
+#include "engines/msdrv_engine.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,8 @@ pc98_kind pc98_probe(const char *filename, const uint8_t *data, size_t len)
 		return PC98_KIND_PAI;
 	if (msb_probe_mem(data, len))
 		return PC98_KIND_MSB;
+	if (msdrv_probe_mem(data, len))
+		return PC98_KIND_MSDRV;
 	if (md_probe_mem(data, len))
 		return PC98_KIND_OPNMD;
 	if (ntl_probe_mem(data, len))
@@ -103,6 +106,7 @@ int pc98_analyze(const char *filename, const uint8_t *data, size_t len,
 	if (k == PC98_KIND_N3G) return n3g_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_PAI) return pai_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_MSB) return msb_analyze_mem(filename, data, len, cfg, out);
+	if (k == PC98_KIND_MSDRV) return msdrv_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_OPNMD) return md_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_NTL) return ntl_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_GNTL) return gntl_analyze_mem(filename, data, len, cfg, out);
@@ -225,6 +229,17 @@ pc98_player *pc98_player_open(const char *filename, const uint8_t *data, size_t 
 		p->one_loop_ms[0] = pai_one_loop_ms_h(p->eng);
 		pc98_bounded(p->filetype, sizeof p->filetype, "PAI");
 		pc98_bounded(p->engine, sizeof p->engine, "ymfm Synthia");
+	} else if (k == PC98_KIND_MSDRV) {
+		p->eng = msdrv_open_mem(filename, data, len, &p->cfg);
+		if (!p->eng) { free(p); return NULL; }
+		msdrv_analyze_mem(filename, data, len, &p->cfg, &inf);
+		fill_from_info(p, &inf);
+		if (msdrv_title_h(p->eng)[0]) pc98_bounded(p->title, sizeof p->title, msdrv_title_h(p->eng));
+		p->one_loop_ms[0] = msdrv_one_loop_ms_h(p->eng);
+		if (inf.filetype[0]) pc98_bounded(p->filetype, sizeof p->filetype, inf.filetype);
+		else pc98_bounded(p->filetype, sizeof p->filetype, "MS");
+		if (inf.engine[0]) pc98_bounded(p->engine, sizeof p->engine, inf.engine);
+		else pc98_bounded(p->engine, sizeof p->engine, "ymfm MsDRV");
 	} else if (k == PC98_KIND_MSB) {
 		p->eng = msb_open_mem(filename, data, len, &p->cfg);
 		if (!p->eng) { free(p); return NULL; }
@@ -302,6 +317,7 @@ void pc98_player_close(pc98_player *p)
 	else if (p->kind == PC98_KIND_N3G) n3g_close_h(p->eng);
 	else if (p->kind == PC98_KIND_PAI) pai_close_h(p->eng);
 	else if (p->kind == PC98_KIND_MSB) msb_close_h(p->eng);
+	else if (p->kind == PC98_KIND_MSDRV) msdrv_close_h(p->eng);
 	else if (p->kind == PC98_KIND_OPNMD) md_close_h(p->eng);
 	else if (p->kind == PC98_KIND_NTL) ntl_close_h(p->eng);
 	else if (p->kind == PC98_KIND_GNTL) gntl_close_h(p->eng);
@@ -322,6 +338,7 @@ int pc98_player_process(pc98_player *p, float *buf, int count)
 	if (p->kind == PC98_KIND_N3G) return n3g_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_PAI) return pai_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_MSB) return msb_process_h(p->eng, buf, count);
+	if (p->kind == PC98_KIND_MSDRV) return msdrv_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_OPNMD) return md_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_NTL) return ntl_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_GNTL) return gntl_process_h(p->eng, buf, count);
@@ -342,6 +359,7 @@ int pc98_player_seek_ms(pc98_player *p, int ms)
 	if (p->kind == PC98_KIND_N3G) return n3g_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_PAI) return pai_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_MSB) return msb_seek_ms_h(p->eng, ms);
+	if (p->kind == PC98_KIND_MSDRV) return msdrv_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_OPNMD) return md_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_NTL) return ntl_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_GNTL) return gntl_seek_ms_h(p->eng, ms);
@@ -378,6 +396,7 @@ int pc98_player_rate(const pc98_player *p)
 	if (p->kind == PC98_KIND_N3G) return n3g_rate_h(p->eng);
 	if (p->kind == PC98_KIND_PAI) return pai_rate_h(p->eng);
 	if (p->kind == PC98_KIND_MSB) return msb_rate_h(p->eng);
+	if (p->kind == PC98_KIND_MSDRV) return msdrv_rate_h(p->eng);
 	if (p->kind == PC98_KIND_OPNMD) return md_rate_h(p->eng);
 	if (p->kind == PC98_KIND_NTL) return ntl_rate_h(p->eng);
 	if (p->kind == PC98_KIND_GNTL) return gntl_rate_h(p->eng);
@@ -433,6 +452,7 @@ void pc98_player_set_loop_count(pc98_player *p, int loops)
 	else if (p->kind == PC98_KIND_N3G) n3g_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_PAI) pai_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_MSB) msb_set_loops_h(p->eng, loops);
+	else if (p->kind == PC98_KIND_MSDRV) msdrv_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_OPNMD) md_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_NTL) ntl_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_GNTL) gntl_set_loops_h(p->eng, loops);
@@ -456,6 +476,7 @@ void pc98_player_apply_mute(pc98_player *p, const pc98_cfg *cfg)
 	else if (p->kind == PC98_KIND_N3G) n3g_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_PAI) pai_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_MSB) msb_apply_mute_h(p->eng, cfg);
+	else if (p->kind == PC98_KIND_MSDRV) msdrv_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_OPNMD) md_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_NTL) ntl_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_GNTL) gntl_apply_mute_h(p->eng, cfg);
