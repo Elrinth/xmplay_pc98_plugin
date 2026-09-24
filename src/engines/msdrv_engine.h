@@ -20,6 +20,9 @@ int msdrv_rate_h(void *h);
 void msdrv_set_loops_h(void *h, int loops);
 void msdrv_apply_mute_h(void *h, const pc98_cfg *cfg);
 const char *msdrv_title_h(void *h);
+const char *msdrv_chip_name_h(void *h);
+int msdrv_variant_h(void *h);
+const char *msdrv_sf2_name_h(void *h);
 
 #ifdef __cplusplus
 }

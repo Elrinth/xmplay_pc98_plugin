@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 #define PC98_PLUGIN_NAME    "PC-98 / S98"
-#define PC98_PLUGIN_VERSION "1.0.24"
-#define PC98_PLUGIN_XMPVER  1002400
+#define PC98_PLUGIN_VERSION "1.0.25"
+#define PC98_PLUGIN_XMPVER  1002500
 #define PC98_MAX_FILE       (16u * 1024u * 1024u)
 #define PC98_MAX_SONGS      256
 #define PC98_DEFAULT_RATE   44100
@@ -43,6 +43,12 @@ typedef struct {
 	int mute_ssg;
 	int mute_rhythm;
 	int mute_adpcm;
+	/* Per-channel mute bitmasks (File Info / Config). 1 = muted. */
+	uint32_t mute_fm_mask;   /* bits 0..5 FM */
+	uint32_t mute_ssg_mask;  /* bits 0..2 SSG */
+	uint32_t mute_rhy_mask;  /* bits 0..5 ADPCM-A */
+	uint32_t mute_opl_mask;  /* bits 0..17 OPL3 */
+	uint32_t mute_midi_mask; /* bits 0..15 GS MIDI */
 	int fade_ms;
 	int rate;
 	char rhythm_path[PC98_PATH_MAX];
@@ -98,6 +104,8 @@ const char *pc98_player_title(const pc98_player *p);
 const char *pc98_player_artist(const pc98_player *p);
 const char *pc98_player_game(const pc98_player *p);
 const char *pc98_player_engine(const pc98_player *p);
+const char *pc98_player_chip(const pc98_player *p);
+const char *pc98_player_sf2(const pc98_player *p);
 const char *pc98_player_filetype(const pc98_player *p);
 
 int pc98_set_write(const char *path, const char *set_id, const char *title,

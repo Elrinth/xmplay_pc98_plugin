@@ -32,6 +32,8 @@ struct pc98_player {
 	char game[256];
 	char filetype[32];
 	char engine[64];
+	char chip[64];
+	char sf2[PC98_PATH_MAX];
 };
 
 static int banned_name(const char *filename)
@@ -240,6 +242,8 @@ pc98_player *pc98_player_open(const char *filename, const uint8_t *data, size_t 
 		else pc98_bounded(p->filetype, sizeof p->filetype, "MS");
 		if (inf.engine[0]) pc98_bounded(p->engine, sizeof p->engine, inf.engine);
 		else pc98_bounded(p->engine, sizeof p->engine, "ymfm MsDRV");
+		pc98_bounded(p->chip, sizeof p->chip, msdrv_chip_name_h(p->eng));
+		pc98_bounded(p->sf2, sizeof p->sf2, msdrv_sf2_name_h(p->eng));
 	} else if (k == PC98_KIND_MSB) {
 		p->eng = msb_open_mem(filename, data, len, &p->cfg);
 		if (!p->eng) { free(p); return NULL; }
@@ -467,6 +471,11 @@ void pc98_player_apply_mute(pc98_player *p, const pc98_cfg *cfg)
 	p->cfg.mute_ssg = cfg->mute_ssg;
 	p->cfg.mute_rhythm = cfg->mute_rhythm;
 	p->cfg.mute_adpcm = cfg->mute_adpcm;
+	p->cfg.mute_fm_mask = cfg->mute_fm_mask;
+	p->cfg.mute_ssg_mask = cfg->mute_ssg_mask;
+	p->cfg.mute_rhy_mask = cfg->mute_rhy_mask;
+	p->cfg.mute_opl_mask = cfg->mute_opl_mask;
+	p->cfg.mute_midi_mask = cfg->mute_midi_mask;
 	if (p->kind == PC98_KIND_S98) s98_apply_mute(p->eng, cfg);
 	else if (p->kind == PC98_KIND_PMD) pmd_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_FMP) fmp_apply_mute_h(p->eng, cfg);
@@ -489,4 +498,6 @@ const char *pc98_player_title(const pc98_player *p) { return p ? p->title : ""; 
 const char *pc98_player_artist(const pc98_player *p) { return p ? p->artist : ""; }
 const char *pc98_player_game(const pc98_player *p) { return p ? p->game : ""; }
 const char *pc98_player_engine(const pc98_player *p) { return p ? p->engine : ""; }
+const char *pc98_player_chip(const pc98_player *p) { return p ? p->chip : ""; }
+const char *pc98_player_sf2(const pc98_player *p) { return p ? p->sf2 : ""; }
 const char *pc98_player_filetype(const pc98_player *p) { return p ? p->filetype : ""; }

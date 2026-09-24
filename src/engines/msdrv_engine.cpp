@@ -69,6 +69,7 @@ struct ms_trk {
 	int sub_sp, sub_ret[MS_NEST], sub_end[MS_NEST];
 	int pb, pb_step, pb_dst;
 	int looped_inf;
+	uint8_t op_mask; /* AA: Special FM3 key-on operator mask (low 4 bits) */
 };
 
 struct ms_state {
@@ -87,6 +88,7 @@ struct ms_state {
 	int rate, loops_want, one_loop_ms, ended, song_ended;
 	int tempo, timebase, tempo_mod;
 	int mute_fm, mute_ssg, mute_rhythm;
+	uint32_t mute_fm_mask, mute_ssg_mask, mute_rhy_mask, mute_opl_mask, mute_midi_mask;
 	int64_t chip_pos, chip_step, tick_acc;
 	int last_l, last_r;
 	int prev_l, prev_r;          /* linear-resample history */
@@ -105,6 +107,8 @@ struct ms_state {
 	int loop_hit;
 	int saw_inf_loop;
 	int ch3_special;             /* A9: OPN/OPNA CH3 special/effect mode */
+	uint8_t ch3_key_slots;       /* currently keyed Special-FM3 op bits 0..3 */
+	uint8_t adpcm_tl;            /* ADPCM-A total level reg 0x11 (0=loud) */
 	int mono;                    /* OPN: force L=R */
 	/* Software ADPCM-A rhythm (when ROM missing) — 6 voices from 2608_*.WAV */
 	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol; } rhy[6];
@@ -115,21 +119,24 @@ struct ms_state {
 	uint32_t reg_tick;
 	uint8_t opl4_mask; /* OPL3 reg 0x104 4-op connection bits */
 	char title[256];
+	char sf2_path[PC98_PATH_MAX];
 
 	ms_state()
 		: opna(NULL), opn_chip(NULL), opl(NULL), sf(NULL), sf_owned(0), rate(PC98_DEFAULT_RATE), loops_want(1),
 		  one_loop_ms(0), ended(0), song_ended(0), tempo(120), timebase(48),
 		  tempo_mod(0x40), mute_fm(0), mute_ssg(0), mute_rhythm(0),
+		  mute_fm_mask(0), mute_ssg_mask(0), mute_rhy_mask(0), mute_opl_mask(0), mute_midi_mask(0),
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
 		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), skip_audio(0),
 		  tsf_fifo_pos(0), tsf_fifo_len(0),
-		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0), opl4_mask(0)
+		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), ch3_key_slots(0), adpcm_tl(0x3F), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0), opl4_mask(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
 		memset(trk, 0, sizeof trk);
 		memset(sh_opn_set, 0, sizeof sh_opn_set);
 		memset(sh_opl_set, 0, sizeof sh_opl_set);
 		title[0] = 0;
+		sf2_path[0] = 0;
 	}
 };
 
@@ -226,6 +233,7 @@ static void wrx(ms_state *s, int ext, uint8_t aa, uint8_t dd)
 }
 static void wr(ms_state *s, uint8_t aa, uint8_t dd)
 {
+	if (aa == 0x11) s->adpcm_tl = dd & 0x3F;
 	wrx(s, 0, aa, dd);
 }
 
@@ -273,16 +281,35 @@ static int fm_key(int hw)
 	return hw <= 2 ? hw : (hw - 3 + 4);
 }
 
+static void fm3_write_op_fnum(ms_state *s, int op_bit, int blk, int fn)
+{
+	/* op_bit 0..3 → YM2608 CH3-special fnum regs (op1=A2/A6, op2=A8/AC,
+	 * op3=A9/AD, op4=AA/AE). */
+	static const uint8_t k_hi[4] = { 0xA6, 0xAC, 0xAD, 0xAE };
+	static const uint8_t k_lo[4] = { 0xA2, 0xA8, 0xA9, 0xAA };
+	if (op_bit < 0 || op_bit > 3) return;
+	wr(s, k_hi[op_bit], (uint8_t)((blk << 3) | ((fn >> 8) & 7)));
+	wr(s, k_lo[op_bit], (uint8_t)fn);
+}
+
 static void fm_off(ms_state *s, ms_trk *t)
 {
+	uint8_t mask;
 	if (t->kind != CK_FM || !t->keyed) return;
-	wr(s, 0x28, (uint8_t)fm_key(t->hw));
+	if (s->ch3_special && t->hw == 2) {
+		mask = t->op_mask ? (t->op_mask & 0x0F) : 0x0F;
+		s->ch3_key_slots = (uint8_t)(s->ch3_key_slots & (uint8_t)~mask);
+		wr(s, 0x28, (uint8_t)((s->ch3_key_slots << 4) | 2));
+	} else {
+		wr(s, 0x28, (uint8_t)fm_key(t->hw));
+	}
 	t->keyed = 0;
 }
 static void fm_on(ms_state *s, ms_trk *t, int note)
 {
-	int n, blk, fn, ext, slot;
+	int n, blk, fn, ext, slot, i;
 	int fnote = note + (t->pb / 256);
+	uint8_t mask;
 	if (t->kind != CK_FM) return;
 	if (fnote < 0) fnote = 0;
 	if (fnote > 127) fnote = 127;
@@ -295,15 +322,18 @@ static void fm_on(ms_state *s, ms_trk *t, int note)
 	fn = k_fnum[n] + t->detune;
 	if (fn < 0) fn = 0;
 	if (fn > 0x7FF) fn = 0x7FF;
-	/* Special CH3 (A9): F0/F1/F2 write extension fnum; key-on CH3. */
-	if (s->ch3_special && t->ch_id >= 0xF0 && t->ch_id <= 0xF2) {
-		static const uint8_t k_ext_hi[3] = { 0xAD, 0xAE, 0xAC }; /* op slots */
-		static const uint8_t k_ext_lo[3] = { 0xA9, 0xAA, 0xA8 };
-		int si = t->ch_id - 0xF0;
+	/* Special CH3: channel 0x52 and F0..F2 share FM3. AA sets which ops
+	 * this track owns; write that note's FNUM to every selected op, then
+	 * key-on with (mask<<4)|2 — matches MSDRV4L (0x32 / 0xC2 / 0xF2). */
+	if (s->ch3_special && (t->ch_id == 0x52 ||
+	    (t->ch_id >= 0xF0 && t->ch_id <= 0xF2))) {
+		mask = t->op_mask ? (t->op_mask & 0x0F) : 0x0F;
 		if (t->keyed) fm_off(s, t);
-		wr(s, k_ext_hi[si], (uint8_t)((blk << 3) | ((fn >> 8) & 7)));
-		wr(s, k_ext_lo[si], (uint8_t)fn);
-		wr(s, 0x28, (uint8_t)(0xF0 | 2)); /* key-on FM3 */
+		for (i = 0; i < 4; i++)
+			if (mask & (1 << i))
+				fm3_write_op_fnum(s, i, blk, fn);
+		s->ch3_key_slots = (uint8_t)(s->ch3_key_slots | mask);
+		wr(s, 0x28, (uint8_t)((s->ch3_key_slots << 4) | 2));
 		t->keyed = 1;
 		t->cur_note = note;
 		t->hw = 2;
@@ -497,14 +527,17 @@ static void opl_on(ms_state *s, ms_trk *t, int note)
 	apply_opl(s, t);
 	port = t->hw >= 9 ? 1 : 0;
 	ch = t->hw % 9;
-	fnote = note + (t->pb / 256);
-	if (fnote < 0) fnote = 0;
-	if (fnote > 127) fnote = 127;
-	/* OPL3: Fnum = freq * 2^(20-block) / (clock/288). block ≈ note/12 - 1. */
-	block = fnote / 12 - 1;
-	if (block < 0) block = 0;
-	if (block > 7) block = 7;
-	freq = 440.0 * pow(2.0, (fnote - 69) / 12.0);
+	{
+		double fnote_f = (double)note + t->pb / 256.0;
+		if (fnote_f < 0) fnote_f = 0;
+		if (fnote_f > 127) fnote_f = 127;
+		/* OPL3: Fnum = freq * 2^(20-block) / (clock/288). Fine PB via fractional note. */
+		block = (int)(fnote_f / 12.0) - 1;
+		if (block < 0) block = 0;
+		if (block > 7) block = 7;
+		freq = 440.0 * pow(2.0, (fnote_f - 69.0) / 12.0);
+		fnote = (int)(fnote_f + 0.5);
+	}
 	fnum = (int)(freq * (double)(1 << (20 - block)) / (MS_OPL_CLOCK / 288.0) + 0.5);
 	if (fnum < 0) fnum = 0;
 	if (fnum > 0x3FF) fnum = 0x3FF;
@@ -513,6 +546,76 @@ static void opl_on(ms_state *s, ms_trk *t, int note)
 		(uint8_t)(0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3)));
 	t->keyed = 1;
 	t->cur_note = note;
+}
+
+/* Rewrite current pitch without a key-off/on cycle (porta / fine PB). */
+static void pitch_refresh(ms_state *s, ms_trk *t)
+{
+	if (!t || !t->keyed) return;
+	if (t->kind == CK_FM) {
+		int note = t->cur_note;
+		int n, blk, fn, ext, slot, i;
+		int fnote = note + (t->pb / 256);
+		uint8_t mask;
+		if (fnote < 0) fnote = 0;
+		if (fnote > 127) fnote = 127;
+		n = fnote % 12;
+		blk = fnote / 12 - 1;
+		if (blk < 0) blk = 0;
+		if (blk > 7) blk = 7;
+		fn = k_fnum[n] + t->detune + (t->pb % 256) / 32;
+		if (fn < 0) fn = 0;
+		if (fn > 0x7FF) fn = 0x7FF;
+		if (s->ch3_special && (t->ch_id == 0x52 ||
+		    (t->ch_id >= 0xF0 && t->ch_id <= 0xF2))) {
+			mask = t->op_mask ? (t->op_mask & 0x0F) : 0x0F;
+			for (i = 0; i < 4; i++)
+				if (mask & (1 << i))
+					fm3_write_op_fnum(s, i, blk, fn);
+			return;
+		}
+		ext = t->hw >= 3;
+		slot = ext ? t->hw - 3 : t->hw;
+		wrx(s, ext, (uint8_t)(0xA4 + slot), (uint8_t)((blk << 3) | ((fn >> 8) & 7)));
+		wrx(s, ext, (uint8_t)(0xA0 + slot), (uint8_t)fn);
+	} else if (t->kind == CK_SSG) {
+		int per, c = t->hw;
+		double freq, period, fnote;
+		if (c < 0 || c > 2) return;
+		fnote = (double)t->cur_note + t->pb / 256.0;
+		if (fnote < 0) fnote = 0;
+		if (fnote > 127) fnote = 127;
+		freq = 440.0 * pow(2.0, (fnote - 69.0) / 12.0);
+		{
+			double ssg_clk = (s->variant == 0) ? (double)s->chip_clock
+							   : ((double)s->chip_clock / 2.0);
+			period = ssg_clk / (16.0 * freq);
+		}
+		per = (int)(period + 0.5) + t->detune;
+		if (per < 1) per = 1;
+		if (per > 0xFFF) per = 0xFFF;
+		wr(s, (uint8_t)(c * 2), (uint8_t)(per & 0xFF));
+		wr(s, (uint8_t)(c * 2 + 1), (uint8_t)((per >> 8) & 0x0F));
+	} else if (t->kind == CK_OPL) {
+		int port, ch, block, fnum;
+		double freq, fnote;
+		if (!s->opl || t->hw < 0 || t->hw > 17) return;
+		port = t->hw >= 9 ? 1 : 0;
+		ch = t->hw % 9;
+		fnote = (double)t->cur_note + t->pb / 256.0;
+		if (fnote < 0) fnote = 0;
+		if (fnote > 127) fnote = 127;
+		block = (int)(fnote / 12.0) - 1;
+		if (block < 0) block = 0;
+		if (block > 7) block = 7;
+		freq = 440.0 * pow(2.0, (fnote - 69.0) / 12.0);
+		fnum = (int)(freq * (double)(1 << (20 - block)) / (MS_OPL_CLOCK / 288.0) + 0.5);
+		if (fnum < 0) fnum = 0;
+		if (fnum > 0x3FF) fnum = 0x3FF;
+		opl_wr(s, port, (uint8_t)(0xA0 + ch), (uint8_t)(fnum & 0xFF));
+		opl_wr(s, port, (uint8_t)(0xB0 + ch),
+			(uint8_t)(0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3)));
+	}
 }
 
 static void midi_off(ms_state *s, ms_trk *t)
@@ -547,15 +650,21 @@ static void note_on(ms_state *s, ms_trk *t, int note, int gate, int vel)
 	if (note == 0 || gate == 0) { note_off(s, t); return; }
 	if (vel >= 0) t->vol = vel;
 	if (t->kind == CK_FM) {
-		if (s->mute_fm) { note_off(s, t); return; }
+		if (s->mute_fm || (s->mute_fm_mask & (1u << (t->hw & 7)))) {
+			note_off(s, t); return;
+		}
 		apply_fm(s, t);
 		fm_on(s, t, note);
 	} else if (t->kind == CK_SSG) {
-		if (s->mute_ssg) { note_off(s, t); return; }
+		if (s->mute_ssg || (s->mute_ssg_mask & (1u << (t->hw & 3)))) {
+			note_off(s, t); return;
+		}
 		ssg_on(s, t, note);
 	} else if (t->kind == CK_MIDI) {
+		if (s->mute_midi_mask & (1u << (t->hw & 15))) { note_off(s, t); return; }
 		midi_on(s, t, note, vel >= 0 ? vel : t->vol);
 	} else if (t->kind == CK_OPL) {
+		if (s->mute_opl_mask & (1u << (t->hw & 31))) { note_off(s, t); return; }
 		opl_on(s, t, note);
 	}
 	t->gate_left = gate;
@@ -583,6 +692,9 @@ static void trk_step(ms_state *s, int ti, int dry)
 				if (t->pb < t->pb_dst) t->pb = t->pb_dst;
 			}
 		}
+		/* MSDRV4L rewrites FNUM/key every tick while a note is held. */
+		if (!dry && t->keyed && (t->kind == CK_OPL || t->pb_step))
+			pitch_refresh(s, t);
 		return;
 	}
 	pc = t->pc;
@@ -717,13 +829,20 @@ static void trk_step(ms_state *s, int ti, int dry)
 	case 0xA4:
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
 		t->pb = (int16_t)(d[pc + 1] | (d[pc + 2] << 8));
+		if (!dry && t->keyed) pitch_refresh(s, t);
 		t->pc = pc + 3; break;
-	case 0xA5: case 0xA6: case 0xA8: case 0xAA:
+	case 0xA5: case 0xA6: case 0xA8:
 	case 0xB0: case 0xB1:
+		t->pc = pc + 2; break;
+	case 0xAA:
+		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
+		t->op_mask = (uint8_t)(d[pc + 1] & 0x0F);
+		if (!t->op_mask) t->op_mask = 0x0F;
 		t->pc = pc + 2; break;
 	case 0xA9:
 		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
 		s->ch3_special = d[pc + 1] ? 1 : 0;
+		if (!s->ch3_special) s->ch3_key_slots = 0;
 		if (!dry && (s->opna || s->opn_chip)) {
 			/* bit6 of 0x27 enables CH3 special / effect mode */
 			wr(s, 0x27, (uint8_t)(s->ch3_special ? 0x40 : 0x00));
@@ -753,6 +872,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 	case 0xAF:
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
 		t->pb = (int16_t)(d[pc + 1] | (d[pc + 2] << 8));
+		if (!dry && t->keyed) pitch_refresh(s, t);
 		t->pc = pc + 3; break;
 	case 0xC1: t->pc = pc + 3; break;
 	case 0xC3: t->pc = pc + 2; break;
@@ -762,13 +882,15 @@ static void trk_step(ms_state *s, int ti, int dry)
 	case 0xD0:
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
 		if (!dry && !s->mute_rhythm) {
-			uint8_t mask = d[pc + 2] & 0x3F;
+			uint8_t mask = (uint8_t)((d[pc + 2] & 0x3F) & ~(uint8_t)s->mute_rhy_mask);
 			if (mask) {
-				/* bit7=1 → key-on selected ADPCM-A channels */
-				wr(s, 0x10, (uint8_t)(0x80 | mask));
+				/* YM2608 ADPCM-A 0x10: bit7=Dump(1)/KeyOn(0), bits5-0=mask.
+				 * MSDRV4L writes mask with bit7 clear to key on; 0 to release. */
+				wr(s, 0x10, mask);
 				rhy_hit(s, mask);
 			} else {
-				wr(s, 0x10, 0x00);
+				wr(s, 0x10, 0x00); /* MSDRV4L clears 0x10 to release */
+				rhy_hit(s, 0);     /* stop WAV voices */
 			}
 		}
 		t->wait = d[pc + 1]; t->pc = pc + 3; break;
@@ -848,6 +970,7 @@ static void reset_trks(ms_state *s)
 		s->trk[i].pc = s->trk_off[i];
 		s->trk[i].vol = 0x64;
 		s->trk[i].pan = 0;
+		s->trk[i].op_mask = 0x0F;
 		s->trk[i].ch_id = 0xFF;
 	}
 }
@@ -1032,13 +1155,24 @@ static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
 static void rhy_hit(ms_state *s, uint8_t mask)
 {
 	int i;
+	int host = s->rate > 0 ? s->rate : 44100;
+	/* YM2608 ADPCM-A effective rate ≈ master/432 (~18.5 kHz @ 8 MHz).
+	 * Bundled 2608_*.WAV are 44.1 kHz dumps of those samples — play at chip
+	 * rate so pitch/length match hardware (not 44.1→44.1). */
+	int chip_hz = (int)(s->chip_clock ? s->chip_clock : 7987200u) / 432;
+	if (chip_hz < 8000) chip_hz = 18500;
 	if (!s->rhy_have_wav || s->iface.rom_n) return;
+	if (mask == 0) {
+		for (i = 0; i < 6; i++) s->rhy[i].on = 0;
+		return;
+	}
 	for (i = 0; i < 6; i++) {
 		if (!(mask & (1 << i))) continue;
 		if (s->rhy[i].pcm.empty()) continue;
 		s->rhy[i].on = 1;
 		s->rhy[i].pos = 0;
-		s->rhy[i].step = (s->rhy[i].rate << 16) / (s->rate > 0 ? s->rate : 44100);
+		s->rhy[i].step = (chip_hz << 16) / host;
+		if (s->rhy[i].step < 1) s->rhy[i].step = 1;
 		s->rhy[i].end = (int)s->rhy[i].pcm.size() << 16;
 	}
 }
@@ -1046,14 +1180,17 @@ static void rhy_hit(ms_state *s, uint8_t mask)
 static void rhy_mix(ms_state *s, int *l, int *r)
 {
 	int i;
+	int tl = s->adpcm_tl & 0x3F; /* 0=loudest, 63=silent; 0.75 dB/step */
 	if (!s->rhy_have_wav || s->iface.rom_n) return;
 	for (i = 0; i < 6; i++) {
-		int sample, vol;
+		int sample, vol, gain;
 		if (!s->rhy[i].on) continue;
 		if (s->rhy[i].pos >= s->rhy[i].end) { s->rhy[i].on = 0; continue; }
 		sample = s->rhy[i].pcm[(size_t)(s->rhy[i].pos >> 16)];
-		vol = s->rhy[i].vol & 0x1F;
-		sample = (sample * (vol + 1)) / 32;
+		vol = s->rhy[i].vol & 0x1F; /* 0x18..0x1D low 5 bits; 0x1F=loud */
+		/* Combine total + per-channel attenuation → linear gain. */
+		gain = (0x3F - tl) * (vol + 1);
+		sample = (sample * gain) / (0x3F * 32);
 		*l += sample;
 		*r += sample;
 		s->rhy[i].pos += s->rhy[i].step;
@@ -1075,6 +1212,8 @@ static void reset_chip(ms_state *s)
 	wr(s, 0x29, 0x80);
 	wr(s, 0x07, 0x38);
 	wr(s, 0x11, 0x3F); /* ADPCM-A total level */
+	s->adpcm_tl = 0x3F;
+	s->ch3_key_slots = 0;
 	for (i = 0; i < 6; i++) {
 		wr(s, 0x28, (uint8_t)(i <= 2 ? i : i - 3 + 4));
 		wr(s, (uint8_t)(0x18 + i), 0xDF); /* ADPCM-A pan L+R + level */
@@ -1205,6 +1344,7 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 	if (s->variant == 2) {
 		char sf2[PC98_PATH_MAX];
 		if (fmd_find_sf2(cfg, filename, 0, sf2, sizeof sf2)) {
+			pc98_bounded(s->sf2_path, sizeof s->sf2_path, sf2);
 			/* Own a dedicated instance — shared FMD cache retains filter/voice
 			 * state across close/open and breaks chunk-identity tests. */
 			s->sf = tsf_load_filename(sf2);
@@ -1589,13 +1729,68 @@ void msdrv_set_loops_h(void *h, int loops)
 void msdrv_apply_mute_h(void *h, const pc98_cfg *cfg)
 {
 	ms_state *s = (ms_state *)h;
+	int i;
 	if (!s || !cfg) return;
 	s->mute_fm = cfg->mute_fm;
 	s->mute_ssg = cfg->mute_ssg;
 	s->mute_rhythm = cfg->mute_rhythm;
+	s->mute_fm_mask = cfg->mute_fm_mask;
+	s->mute_ssg_mask = cfg->mute_ssg_mask;
+	s->mute_rhy_mask = cfg->mute_rhy_mask;
+	s->mute_opl_mask = cfg->mute_opl_mask;
+	s->mute_midi_mask = cfg->mute_midi_mask;
+	/* Kill currently sounding muted channels immediately. */
+	for (i = 0; i < MS_TRK; i++) {
+		ms_trk *tr = &s->trk[i];
+		if (!tr->keyed) continue;
+		if (tr->kind == CK_FM && (s->mute_fm || (s->mute_fm_mask & (1u << (tr->hw & 7)))))
+			note_off(s, tr);
+		else if (tr->kind == CK_SSG && (s->mute_ssg || (s->mute_ssg_mask & (1u << (tr->hw & 3)))))
+			note_off(s, tr);
+		else if (tr->kind == CK_OPL && (s->mute_opl_mask & (1u << (tr->hw & 31))))
+			note_off(s, tr);
+		else if (tr->kind == CK_MIDI && (s->mute_midi_mask & (1u << (tr->hw & 15))))
+			note_off(s, tr);
+	}
+	if (s->mute_rhythm || s->mute_rhy_mask) {
+		uint8_t keep = (uint8_t)(0x3F & ~s->mute_rhy_mask);
+		if (s->mute_rhythm) keep = 0;
+		for (i = 0; i < 6; i++)
+			if (!(keep & (1 << i))) s->rhy[i].on = 0;
+	}
 }
 const char *msdrv_title_h(void *h)
 {
 	ms_state *s = (ms_state *)h;
 	return s ? s->title : "";
+}
+
+
+const char *msdrv_chip_name_h(void *h)
+{
+	ms_state *s = (ms_state *)h;
+	if (!s) return "MsDRV";
+	if (s->variant == 0) return "YM2203 OPN";
+	if (s->variant == 1) return "YM2608 OPNA";
+	if (s->variant == 2) return "GS MIDI (SF2)";
+	return "YMF262 OPL3";
+}
+
+int msdrv_variant_h(void *h)
+{
+	ms_state *s = (ms_state *)h;
+	return s ? s->variant : -1;
+}
+
+const char *msdrv_sf2_name_h(void *h)
+{
+	ms_state *s = (ms_state *)h;
+	if (!s || !s->sf2_path[0]) return "";
+	{
+		const char *p = s->sf2_path;
+		const char *slash = p;
+		for (; *p; p++)
+			if (*p == '/' || *p == '\\') slash = p + 1;
+		return slash;
+	}
 }

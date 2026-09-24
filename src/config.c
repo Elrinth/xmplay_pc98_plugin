@@ -30,6 +30,7 @@ void pc98_cfg_clamp(pc98_cfg *c)
 	c->mute_ssg = c->mute_ssg ? 1 : 0;
 	c->mute_rhythm = c->mute_rhythm ? 1 : 0;
 	c->mute_adpcm = c->mute_adpcm ? 1 : 0;
+	/* channel masks left as-is */
 }
 
 static void trim(char *s)
@@ -69,6 +70,11 @@ void pc98_cfg_load_ini(pc98_cfg *c, const char *dll_dir)
 		else if (pc98_ieq(line, "mute_ssg")) c->mute_ssg = atoi(eq);
 		else if (pc98_ieq(line, "mute_rhythm")) c->mute_rhythm = atoi(eq);
 		else if (pc98_ieq(line, "mute_adpcm")) c->mute_adpcm = atoi(eq);
+		else if (pc98_ieq(line, "mute_fm_mask")) c->mute_fm_mask = (uint32_t)strtoul(eq, NULL, 0);
+		else if (pc98_ieq(line, "mute_ssg_mask")) c->mute_ssg_mask = (uint32_t)strtoul(eq, NULL, 0);
+		else if (pc98_ieq(line, "mute_rhy_mask")) c->mute_rhy_mask = (uint32_t)strtoul(eq, NULL, 0);
+		else if (pc98_ieq(line, "mute_opl_mask")) c->mute_opl_mask = (uint32_t)strtoul(eq, NULL, 0);
+		else if (pc98_ieq(line, "mute_midi_mask")) c->mute_midi_mask = (uint32_t)strtoul(eq, NULL, 0);
 		else if (pc98_ieq(line, "fade_ms")) c->fade_ms = atoi(eq);
 		else if (pc98_ieq(line, "rate")) c->rate = atoi(eq);
 		else if (pc98_ieq(line, "rhythm_path")) pc98_bounded(c->rhythm_path, sizeof c->rhythm_path, eq);
@@ -97,6 +103,11 @@ void pc98_cfg_save_ini(const pc98_cfg *c, const char *dll_dir)
 	fprintf(fp, "mute_ssg=%d\n", c->mute_ssg);
 	fprintf(fp, "mute_rhythm=%d\n", c->mute_rhythm);
 	fprintf(fp, "mute_adpcm=%d\n", c->mute_adpcm);
+	fprintf(fp, "mute_fm_mask=%u\n", (unsigned)c->mute_fm_mask);
+	fprintf(fp, "mute_ssg_mask=%u\n", (unsigned)c->mute_ssg_mask);
+	fprintf(fp, "mute_rhy_mask=%u\n", (unsigned)c->mute_rhy_mask);
+	fprintf(fp, "mute_opl_mask=%u\n", (unsigned)c->mute_opl_mask);
+	fprintf(fp, "mute_midi_mask=%u\n", (unsigned)c->mute_midi_mask);
 	fprintf(fp, "fade_ms=%d\n", c->fade_ms);
 	fprintf(fp, "rate=%d\n", c->rate);
 	fprintf(fp, "rhythm_path=%s\n", c->rhythm_path);

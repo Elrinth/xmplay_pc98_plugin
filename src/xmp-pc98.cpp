@@ -341,6 +341,11 @@ static void WINAPI pc_About(HWND win)
 #define IDC_HOOTRIP 1034
 #define IDC_GSSF2   1035
 #define IDC_MTSF2   1036
+#define IDC_CHMUTE  1040
+#define IDC_MUTEFM1 1100
+#define IDC_MUTESSG1 1110
+#define IDC_MUTERHY1 1120
+#define IDC_MUTEOPL1 1130
 
 static pc98_cfg g_cfg_dlg_backup;
 
@@ -367,6 +372,145 @@ static void cfg_dlg_read_all(HWND hwnd)
 	pc98_cfg_clamp(&g_cfg);
 }
 
+static void cfg_dlg_read_masks(HWND hwnd)
+{
+	int i;
+	g_cfg.mute_fm_mask = 0;
+	g_cfg.mute_ssg_mask = 0;
+	g_cfg.mute_rhy_mask = 0;
+	g_cfg.mute_opl_mask = 0;
+	for (i = 0; i < 6; i++)
+		if (IsDlgButtonChecked(hwnd, IDC_MUTEFM1 + i) == BST_CHECKED)
+			g_cfg.mute_fm_mask |= (1u << i);
+	for (i = 0; i < 3; i++)
+		if (IsDlgButtonChecked(hwnd, IDC_MUTESSG1 + i) == BST_CHECKED)
+			g_cfg.mute_ssg_mask |= (1u << i);
+	for (i = 0; i < 6; i++)
+		if (IsDlgButtonChecked(hwnd, IDC_MUTERHY1 + i) == BST_CHECKED)
+			g_cfg.mute_rhy_mask |= (1u << i);
+	for (i = 0; i < 9; i++)
+		if (IsDlgButtonChecked(hwnd, IDC_MUTEOPL1 + i) == BST_CHECKED)
+			g_cfg.mute_opl_mask |= (1u << i);
+}
+
+static void cfg_dlg_set_masks(HWND hwnd)
+{
+	int i;
+	for (i = 0; i < 6; i++)
+		CheckDlgButton(hwnd, IDC_MUTEFM1 + i,
+			(g_cfg.mute_fm_mask & (1u << i)) ? BST_CHECKED : BST_UNCHECKED);
+	for (i = 0; i < 3; i++)
+		CheckDlgButton(hwnd, IDC_MUTESSG1 + i,
+			(g_cfg.mute_ssg_mask & (1u << i)) ? BST_CHECKED : BST_UNCHECKED);
+	for (i = 0; i < 6; i++)
+		CheckDlgButton(hwnd, IDC_MUTERHY1 + i,
+			(g_cfg.mute_rhy_mask & (1u << i)) ? BST_CHECKED : BST_UNCHECKED);
+	for (i = 0; i < 9; i++)
+		CheckDlgButton(hwnd, IDC_MUTEOPL1 + i,
+			(g_cfg.mute_opl_mask & (1u << i)) ? BST_CHECKED : BST_UNCHECKED);
+}
+
+static INT_PTR CALLBACK chmute_dlg(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+	(void)lp;
+	switch (msg) {
+	case WM_INITDIALOG:
+		cfg_dlg_set_masks(hwnd);
+		return TRUE;
+	case WM_COMMAND: {
+		WORD id = LOWORD(wp);
+		WORD code = HIWORD(wp);
+		if (id == IDOK) {
+			cfg_dlg_read_masks(hwnd);
+			pc98_cfg_clamp(&g_cfg);
+			pc98_cfg_save_ini(&g_cfg, g_dll_dir);
+			apply_cfg();
+			EndDialog(hwnd, IDOK);
+			return TRUE;
+		}
+		if (id == IDCANCEL) {
+			EndDialog(hwnd, IDCANCEL);
+			return TRUE;
+		}
+		if (code == BN_CLICKED &&
+		    ((id >= IDC_MUTEFM1 && id < IDC_MUTEFM1 + 6) ||
+		     (id >= IDC_MUTESSG1 && id < IDC_MUTESSG1 + 3) ||
+		     (id >= IDC_MUTERHY1 && id < IDC_MUTERHY1 + 6) ||
+		     (id >= IDC_MUTEOPL1 && id < IDC_MUTEOPL1 + 9))) {
+			cfg_dlg_read_masks(hwnd);
+			pc98_cfg_clamp(&g_cfg);
+			apply_cfg();
+			return TRUE;
+		}
+		break;
+	}
+	}
+	return FALSE;
+}
+
+static void open_chmute_dlg(HWND parent)
+{
+	WORD *p;
+	DLGTEMPLATE *dlg;
+	unsigned char raw[8192];
+	int i;
+	wchar_t lab[4];
+	memset(raw, 0, sizeof raw);
+	dlg = (DLGTEMPLATE *)raw;
+	dlg->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+	dlg->cdit = 6 + 3 + 6 + 9 + 2 + 4;
+	dlg->x = 10; dlg->y = 10; dlg->cx = 280; dlg->cy = 160;
+	p = (WORD *)(dlg + 1);
+	*p++ = 0; *p++ = 0;
+	{ const wchar_t *cap = L"Channel mutes (live)"; size_t i;
+	  for (i = 0; cap[i]; ++i) *p++ = (WORD)cap[i]; *p++ = 0; }
+	*p++ = 9;
+	{ const wchar_t *fnt = L"MS Shell Dlg"; size_t i;
+	  for (i = 0; fnt[i]; ++i) *p++ = (WORD)fnt[i]; *p++ = 0; }
+#define ADDCH(_id, _x, _y, _w, _h, _style, _clsid, _title) do { \
+	DLGITEMTEMPLATE *item; \
+	if (((uintptr_t)p) & 3) p = (WORD *)((((uintptr_t)p) + 3) & ~(uintptr_t)3); \
+	item = (DLGITEMTEMPLATE *)p; \
+	item->style = WS_CHILD | WS_VISIBLE | (_style); \
+	item->x = (short)(_x); item->y = (short)(_y); \
+	item->cx = (short)(_w); item->cy = (short)(_h); \
+	item->id = (WORD)(_id); \
+	p = (WORD *)(item + 1); \
+	*p++ = 0xFFFF; *p++ = (WORD)(_clsid); \
+	{ const wchar_t *_t = (_title); size_t _i; \
+	for (_i = 0; _t[_i]; ++_i) *p++ = (WORD)_t[_i]; *p++ = 0; } \
+	*p++ = 0; \
+} while (0)
+	ADDCH(-1, 8, 6, 24, 10, 0, 0x0082, L"FM");
+	for (i = 0; i < 6; i++) {
+		lab[0] = (wchar_t)(L'1' + i); lab[1] = 0;
+		ADDCH(IDC_MUTEFM1 + i, 32 + i * 28, 4, 26, 12,
+			WS_TABSTOP | BS_AUTOCHECKBOX, 0x0080, lab);
+	}
+	ADDCH(-1, 8, 22, 24, 10, 0, 0x0082, L"SSG");
+	for (i = 0; i < 3; i++) {
+		lab[0] = (wchar_t)(L'1' + i); lab[1] = 0;
+		ADDCH(IDC_MUTESSG1 + i, 32 + i * 28, 20, 26, 12,
+			WS_TABSTOP | BS_AUTOCHECKBOX, 0x0080, lab);
+	}
+	ADDCH(-1, 8, 38, 24, 10, 0, 0x0082, L"Rhy");
+	for (i = 0; i < 6; i++) {
+		lab[0] = (wchar_t)(L'1' + i); lab[1] = 0;
+		ADDCH(IDC_MUTERHY1 + i, 32 + i * 28, 36, 26, 12,
+			WS_TABSTOP | BS_AUTOCHECKBOX, 0x0080, lab);
+	}
+	ADDCH(-1, 8, 54, 24, 10, 0, 0x0082, L"OPL");
+	for (i = 0; i < 9; i++) {
+		lab[0] = (wchar_t)(L'1' + i); lab[1] = 0;
+		ADDCH(IDC_MUTEOPL1 + i, 32 + i * 26, 52, 24, 12,
+			WS_TABSTOP | BS_AUTOCHECKBOX, 0x0080, lab);
+	}
+	ADDCH(IDOK, 170, 136, 46, 14, WS_TABSTOP | BS_DEFPUSHBUTTON, 0x0080, L"OK");
+	ADDCH(IDCANCEL, 222, 136, 46, 14, WS_TABSTOP | BS_PUSHBUTTON, 0x0080, L"Cancel");
+#undef ADDCH
+	DialogBoxIndirectParamA(g_hinst, dlg, parent, chmute_dlg, 0);
+}
+
 static INT_PTR CALLBACK cfg_dlg(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
 	(void)lp;
@@ -391,6 +535,9 @@ static INT_PTR CALLBACK cfg_dlg(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		return TRUE;
 	case WM_COMMAND:
 		switch (LOWORD(wp)) {
+		case IDC_CHMUTE:
+			open_chmute_dlg(hwnd);
+			return TRUE;
 		case IDOK:
 			cfg_dlg_read_all(hwnd);
 			pc98_cfg_save_ini(&g_cfg, g_dll_dir);
@@ -408,6 +555,7 @@ static INT_PTR CALLBACK cfg_dlg(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	return FALSE;
 }
 
+
 static void WINAPI pc_Config(HWND win)
 {
 	WORD *p;
@@ -416,8 +564,8 @@ static void WINAPI pc_Config(HWND win)
 	memset(raw, 0, sizeof raw);
 	dlg = (DLGTEMPLATE *)raw;
 	dlg->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
-	dlg->cdit = 28;
-	dlg->x = 10; dlg->y = 10; dlg->cx = 260; dlg->cy = 228;
+	dlg->cdit = 29;
+	dlg->x = 10; dlg->y = 10; dlg->cx = 260; dlg->cy = 240;
 	p = (WORD *)(dlg + 1);
 	*p++ = 0;
 	*p++ = 0;
@@ -474,8 +622,9 @@ static void WINAPI pc_Config(HWND win)
 	ADDCTL(IDC_GSSF2, 58, 132, 192, 12, WS_TABSTOP | ES_AUTOHSCROLL | WS_BORDER, 0x0081, L"");
 	ADDCTL(-1, 8, 150, 48, 10, 0, 0x0082, L"CM-64");
 	ADDCTL(IDC_MTSF2, 58, 148, 192, 12, WS_TABSTOP | ES_AUTOHSCROLL | WS_BORDER, 0x0081, L"");
-	ADDCTL(IDOK, 148, 206, 46, 14, WS_TABSTOP | BS_DEFPUSHBUTTON, 0x0080, L"OK");
-	ADDCTL(IDCANCEL, 200, 206, 46, 14, WS_TABSTOP | BS_PUSHBUTTON, 0x0080, L"Cancel");
+	ADDCTL(IDC_CHMUTE, 8, 206, 90, 14, WS_TABSTOP | BS_PUSHBUTTON, 0x0080, L"Channel mutes");
+	ADDCTL(IDOK, 148, 220, 46, 14, WS_TABSTOP | BS_DEFPUSHBUTTON, 0x0080, L"OK");
+	ADDCTL(IDCANCEL, 200, 220, 46, 14, WS_TABSTOP | BS_PUSHBUTTON, 0x0080, L"Cancel");
 #undef ADDCTL
 	DialogBoxIndirectParamA(g_hinst, dlg, win, cfg_dlg, 0);
 }
@@ -666,6 +815,10 @@ static void WINAPI pc_GetGeneralInfo(char *buf)
 	write_kv(&p, end, "Game", pc98_player_game(g_play));
 	write_kv(&p, end, "Format", pc98_player_filetype(g_play));
 	write_kv(&p, end, "Engine", pc98_player_engine(g_play));
+	if (pc98_player_chip(g_play)[0])
+		write_kv(&p, end, "Chip", pc98_player_chip(g_play));
+	if (pc98_player_sf2(g_play)[0])
+		write_kv(&p, end, "SF2", pc98_player_sf2(g_play));
 	if (pc98_player_songs(g_play) > 1) {
 		snprintf(num, sizeof num, "%d", pc98_player_songs(g_play));
 		write_kv(&p, end, "Tracks", num);
