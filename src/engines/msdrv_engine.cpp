@@ -111,7 +111,7 @@ struct ms_state {
 	uint8_t adpcm_tl;            /* ADPCM-A total level reg 0x11 (0=loud) */
 	int mono;                    /* OPN: force L=R */
 	/* Software ADPCM-A rhythm (when ROM missing) — 6 voices from 2608_*.WAV */
-	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol; } rhy[6];
+	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol, fade, fade_max; } rhy[6];
 	int rhy_have_wav;
 	std::vector<uint8_t> rhy_rom;
 	/* Optional register log for tools/msdrv_reglog */
@@ -363,12 +363,15 @@ static void ssg_on(ms_state *s, ms_trk *t, int note)
 	if (t->kind != CK_SSG || c < 0 || c > 2) return;
 	if (fnote < 0) fnote = 0;
 	if (fnote > 127) fnote = 127;
+	/* MsDRV notes match FM (C3=48); MSDRV4L SSG sounds one octave higher. */
+	fnote += 12;
+	if (fnote > 127) fnote = 127;
 	freq = 440.0 * pow(2.0, (fnote - 69) / 12.0);
-	/* YM2608 SSG runs at master/2; YM2203 SSG at master. Both yield ~4 MHz. */
+	/* Tone = ssg_clk/(64*period). OPN~4MHz; OPNA SSG at master/2 → ~4MHz. */
 	{
 		double ssg_clk = (s->variant == 0) ? (double)s->chip_clock
 						   : ((double)s->chip_clock / 2.0);
-		period = ssg_clk / (16.0 * freq);
+		period = ssg_clk / (64.0 * freq);
 	}
 	per = (int)(period + 0.5) + t->detune;
 	if (per < 1) per = 1;
@@ -585,11 +588,13 @@ static void pitch_refresh(ms_state *s, ms_trk *t)
 		fnote = (double)t->cur_note + t->pb / 256.0;
 		if (fnote < 0) fnote = 0;
 		if (fnote > 127) fnote = 127;
+		fnote += 12.0;
+		if (fnote > 127.0) fnote = 127.0;
 		freq = 440.0 * pow(2.0, (fnote - 69.0) / 12.0);
 		{
 			double ssg_clk = (s->variant == 0) ? (double)s->chip_clock
 							   : ((double)s->chip_clock / 2.0);
-			period = ssg_clk / (16.0 * freq);
+			period = ssg_clk / (64.0 * freq);
 		}
 		per = (int)(period + 0.5) + t->detune;
 		if (per < 1) per = 1;
@@ -1133,6 +1138,8 @@ static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
 		s->rhy[i].rate = rate;
 		s->rhy[i].vol = 0x1F;
 		s->rhy[i].on = 0;
+		s->rhy[i].fade = 0;
+		s->rhy[i].fade_max = 0;
 		got++;
 	}
 	/* Also try risingdaw-refs bundled path */
@@ -1156,24 +1163,35 @@ static void rhy_hit(ms_state *s, uint8_t mask)
 {
 	int i;
 	int host = s->rate > 0 ? s->rate : 44100;
-	/* YM2608 ADPCM-A effective rate ≈ master/432 (~18.5 kHz @ 8 MHz).
-	 * Bundled 2608_*.WAV are 44.1 kHz dumps of those samples — play at chip
-	 * rate so pitch/length match hardware (not 44.1→44.1). */
-	int chip_hz = (int)(s->chip_clock ? s->chip_clock : 7987200u) / 432;
-	if (chip_hz < 8000) chip_hz = 18500;
-	if (!s->rhy_have_wav || s->iface.rom_n) return;
-	if (mask == 0) {
-		for (i = 0; i < 6; i++) s->rhy[i].on = 0;
+	/* Bundled 2608_*.WAV are true 44.1 kHz recordings of ADPCM-A drums.
+	 * Play at the WAV rate (not chip/432) so pitch matches the dump; chip-rate
+	 * stepping stretched them and left non-zero tails that clicked on stop. */
+	if (!s->rhy_have_wav || s->iface.rom_n) {
 		return;
 	}
+	/* Soft-stop any channel whose bit is clear (release or remask). */
 	for (i = 0; i < 6; i++) {
+		if (mask & (1 << i)) continue;
+		if (s->rhy[i].on && s->rhy[i].fade == 0) {
+			s->rhy[i].fade_max = host / 125; /* ~8 ms */
+			if (s->rhy[i].fade_max < 32) s->rhy[i].fade_max = 32;
+			s->rhy[i].fade = s->rhy[i].fade_max;
+		}
+	}
+	if (mask == 0) return;
+	for (i = 0; i < 6; i++) {
+		int src_hz;
 		if (!(mask & (1 << i))) continue;
 		if (s->rhy[i].pcm.empty()) continue;
+		src_hz = s->rhy[i].rate > 0 ? s->rhy[i].rate : 44100;
 		s->rhy[i].on = 1;
+		s->rhy[i].fade = 0;
+		s->rhy[i].fade_max = 0;
 		s->rhy[i].pos = 0;
-		s->rhy[i].step = (chip_hz << 16) / host;
+		/* 44100<<16 overflows int32 → step 0 → silent drums. */
+		s->rhy[i].step = (int)(((int64_t)src_hz << 16) / host);
 		if (s->rhy[i].step < 1) s->rhy[i].step = 1;
-		s->rhy[i].end = (int)s->rhy[i].pcm.size() << 16;
+		s->rhy[i].end = (int)((int64_t)s->rhy[i].pcm.size() << 16);
 	}
 }
 
@@ -1183,14 +1201,38 @@ static void rhy_mix(ms_state *s, int *l, int *r)
 	int tl = s->adpcm_tl & 0x3F; /* 0=loudest, 63=silent; 0.75 dB/step */
 	if (!s->rhy_have_wav || s->iface.rom_n) return;
 	for (i = 0; i < 6; i++) {
-		int sample, vol, gain;
+		int sample, vol, atten, level, idx, remain, pos_samp;
 		if (!s->rhy[i].on) continue;
-		if (s->rhy[i].pos >= s->rhy[i].end) { s->rhy[i].on = 0; continue; }
-		sample = s->rhy[i].pcm[(size_t)(s->rhy[i].pos >> 16)];
-		vol = s->rhy[i].vol & 0x1F; /* 0x18..0x1D low 5 bits; 0x1F=loud */
-		/* Combine total + per-channel attenuation → linear gain. */
-		gain = (0x3F - tl) * (vol + 1);
-		sample = (sample * gain) / (0x3F * 32);
+		if (s->rhy[i].pos >= s->rhy[i].end) {
+			s->rhy[i].on = 0;
+			s->rhy[i].fade = 0;
+			continue;
+		}
+		idx = s->rhy[i].pos >> 16;
+		sample = s->rhy[i].pcm[(size_t)idx];
+		vol = s->rhy[i].vol & 0x1F; /* 0x18..0x1D low 5 bits */
+		/* ymfm: atten = (level^0x1F)+(tl^0x3F); 0=loud. Songs leave TL=0x3F. */
+		atten = (vol ^ 0x1F) + (tl ^ 0x3F);
+		if (atten >= 63) {
+			s->rhy[i].pos += s->rhy[i].step;
+			continue;
+		}
+		level = 63 - atten;
+		sample = (sample * level) / (63 * 2); /* /2 stacked-hit headroom */
+		pos_samp = s->rhy[i].pos >> 16;
+		if (pos_samp < 32)
+			sample = (sample * (pos_samp + 1)) / 32;
+		remain = (s->rhy[i].end - s->rhy[i].pos) >> 16;
+		if (remain < 64 && remain >= 0)
+			sample = (sample * (remain + 1)) / 64;
+		if (s->rhy[i].fade > 0) {
+			sample = (sample * s->rhy[i].fade) / (s->rhy[i].fade_max > 0 ? s->rhy[i].fade_max : 1);
+			s->rhy[i].fade--;
+			if (s->rhy[i].fade <= 0) {
+				s->rhy[i].on = 0;
+				s->rhy[i].fade = 0;
+			}
+		}
 		*l += sample;
 		*r += sample;
 		s->rhy[i].pos += s->rhy[i].step;
@@ -1408,6 +1450,8 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 			if (s->reg_log)
 				fprintf(s->reg_log, "# tick chip port reg val\n");
 		}
+		if (s->opl)
+			opl_wr(s, 0, 0xBD, 0x00); /* MSDRV4L: rhythm mode off (0xBD=0) */
 	}
 	s->play_samples = 0;
 	s->tick_acc = 0;
