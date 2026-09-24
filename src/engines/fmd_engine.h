@@ -26,6 +26,9 @@ const char *fmd_type_h(void *h);
 int fmd_find_sf2(const pc98_cfg *cfg, const char *filename, int mt,
 		char *out, size_t cap);
 void *fmd_font_get(const char *path);
+/* Per-open instance: tsf_copy of the cached SF2 (no sample reload). */
+void *fmd_font_open(const char *path);
+void fmd_font_release(void *sf);
 
 #ifdef __cplusplus
 }

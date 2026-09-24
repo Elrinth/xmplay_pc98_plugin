@@ -279,6 +279,35 @@ void *fmd_font_get(const char *path)
 	return g_sf;
 }
 
+#ifdef __cplusplus
+extern "C"
+#endif
+void *fmd_font_open(const char *path)
+{
+	tsf *base, *inst;
+	base = (tsf *)fmd_font_get(path);
+	if (!base) return NULL;
+	inst = tsf_copy(base);
+	if (!inst) return NULL;
+	tsf_set_max_voices(inst, 128);
+	return inst;
+}
+
+#ifdef __cplusplus
+extern "C"
+#endif
+void fmd_font_release(void *sf)
+{
+	tsf *f = (tsf *)sf;
+	int c;
+	if (!f) return;
+	for (c = 0; c < 16; c++)
+		tsf_channel_sounds_off_all(f, c);
+	tsf_note_off_all(f);
+	tsf_reset(f);
+	tsf_close(f);
+}
+
 static void push_ev(std::vector<fmd_ev> *ev, uint32_t tick, uint8_t st,
 		uint8_t ch, uint8_t a, uint8_t b)
 {
@@ -943,8 +972,9 @@ static int setup(fmd_state *s, const char *filename, const uint8_t *data,
 	s->sf2_path[0] = 0;
 	if (want_sf) {
 		if (fmd_find_sf2(cfg, filename, s->is_mt, s->sf2_path, sizeof s->sf2_path))
-			s->sf = (tsf *)fmd_font_get(s->sf2_path);
+			s->sf = (tsf *)fmd_font_open(s->sf2_path);
 		if (s->sf) {
+			s->own_sf = 1;
 			const char *bn = strrchr(s->sf2_path, '\\');
 			if (!bn) bn = strrchr(s->sf2_path, '/');
 			bn = bn ? bn + 1 : s->sf2_path;
@@ -1004,6 +1034,18 @@ void fmd_close_h(void *h)
 {
 	fmd_state *s = (fmd_state *)h;
 	if (!s) return;
+	if (s->sf) {
+		if (s->own_sf) fmd_font_release(s->sf);
+		else {
+			int c;
+			for (c = 0; c < 16; c++)
+				tsf_channel_sounds_off_all(s->sf, c);
+			tsf_note_off_all(s->sf);
+			tsf_reset(s->sf);
+		}
+		s->sf = NULL;
+		s->own_sf = 0;
+	}
 	delete s;
 }
 
@@ -1126,22 +1168,33 @@ int fmd_seek_ms_h(void *h, int ms)
 	s->cur_tick = tick;
 	s->play_samples = target;
 	s->tick_acc = 0;
-	if (s->sf) {
-		/* kill hanging notes from the fast-forward */
-		int c;
-		for (c = 0; c < 16; c++)
-			tsf_channel_sounds_off_all(s->sf, c);
-		/* re-apply program/cc only */
-		{
-			size_t save = s->ev_i, k;
-			s->ev_i = 0;
+	if (s->sf && s->own_sf && s->sf2_path[0]) {
+		/* Fresh tsf_copy from cache — avoids voice residue after play. */
+		size_t save = s->ev_i, k;
+		fmd_font_release(s->sf);
+		s->sf = (tsf *)fmd_font_open(s->sf2_path);
+		s->own_sf = s->sf ? 1 : 0;
+		s->ev_i = 0;
+		if (s->sf) {
 			init_channels(s);
 			for (k = 0; k < save; k++) {
 				if (s->ev[k].st != EV_NOTEON && s->ev[k].st != EV_NOTEOFF)
 					apply_ev(s, &s->ev[k]);
 			}
-			s->ev_i = save;
 		}
+		s->ev_i = save;
+	} else if (s->sf) {
+		int c;
+		size_t save = s->ev_i, k;
+		for (c = 0; c < 16; c++)
+			tsf_channel_sounds_off_all(s->sf, c);
+		s->ev_i = 0;
+		init_channels(s);
+		for (k = 0; k < save; k++) {
+			if (s->ev[k].st != EV_NOTEON && s->ev[k].st != EV_NOTEOFF)
+				apply_ev(s, &s->ev[k]);
+		}
+		s->ev_i = save;
 	}
 	return 0;
 }

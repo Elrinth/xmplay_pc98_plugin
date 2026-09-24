@@ -41,6 +41,7 @@ struct MmdState {
 	uint32_t cur_tick;
 	int ended, tick_left;
 	tsf *sf;
+	int own_sf;
 	uint32_t mute_midi;
 	float fifo[MMD_FIFO * 2];
 	int fifo_pos, fifo_len;
@@ -389,9 +390,12 @@ static int setup(MmdState *s, const char *filename, const uint8_t *data, size_t 
 	pc98_bounded(s->engine, sizeof s->engine, "MMD.COM / TinySoundFont GS");
 	s->sf2_path[0] = s->sf2_name[0] = 0;
 	s->sf = NULL;
+	s->own_sf = 0;
 	if (need_sf) {
-		if (fmd_find_sf2(cfg, filename, 0, s->sf2_path, sizeof s->sf2_path))
-			s->sf = (tsf *)fmd_font_get(s->sf2_path);
+		if (fmd_find_sf2(cfg, filename, 0, s->sf2_path, sizeof s->sf2_path)) {
+			s->sf = (tsf *)fmd_font_open(s->sf2_path);
+			s->own_sf = s->sf ? 1 : 0;
+		}
 		if (!s->sf) {
 			static const char *fb[] = {
 				"/workspace/sf2/FluidR3_GM.sf2",
@@ -404,7 +408,8 @@ static int setup(MmdState *s, const char *filename, const uint8_t *data, size_t 
 				if (!f) continue;
 				fclose(f);
 				pc98_bounded(s->sf2_path, sizeof s->sf2_path, fb[fi]);
-				s->sf = (tsf *)fmd_font_get(s->sf2_path);
+				s->sf = (tsf *)fmd_font_open(s->sf2_path);
+				s->own_sf = s->sf ? 1 : 0;
 				if (s->sf) break;
 			}
 		}
@@ -459,7 +464,20 @@ void *mmd_open_mem(const char *filename, const uint8_t *data, size_t len,
 void mmd_close_h(void *h)
 {
 	MmdState *s = (MmdState *)h;
-	if (s) delete s;
+	if (!s) return;
+	if (s->sf) {
+		if (s->own_sf) fmd_font_release(s->sf);
+		else {
+			int c;
+			for (c = 0; c < 16; c++)
+				tsf_channel_sounds_off_all(s->sf, c);
+			tsf_note_off_all(s->sf);
+			tsf_reset(s->sf);
+		}
+		s->sf = NULL;
+		s->own_sf = 0;
+	}
+	delete s;
 }
 
 int mmd_process_h(void *h, float *buf, int count)
@@ -519,7 +537,20 @@ int mmd_seek_ms_h(void *h, int ms)
 	size_t k;
 	if (!s) return -1;
 	if (ms < 0) ms = 0;
-	if (s->sf) {
+	/* Fresh tsf_copy from the cached SF2 (no disk reload) so seek matches a
+	 * cold open — tsf_reset alone can leave voice/mix residue after play. */
+	if (s->sf && s->own_sf && s->sf2_path[0]) {
+		fmd_font_release(s->sf);
+		s->sf = (tsf *)fmd_font_open(s->sf2_path);
+		s->own_sf = s->sf ? 1 : 0;
+		if (s->sf) {
+			tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
+			init_chs(s->sf);
+		}
+	} else if (s->sf) {
+		int c;
+		for (c = 0; c < 16; c++)
+			tsf_channel_sounds_off_all(s->sf, c);
 		tsf_note_off_all(s->sf);
 		tsf_reset(s->sf);
 		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
@@ -533,11 +564,12 @@ int mmd_seek_ms_h(void *h, int ms)
 	s->fifo_pos = s->fifo_len = 0;
 	s->tick_left = 0;
 	tick = (uint32_t)(((int64_t)ms * 1000) * (int64_t)MMD_TPQ / s->tempo_us);
-	for (k = 0; k < s->ev.size() && s->ev[k].tick <= tick; k++) {
+	/* Fast-forward controllers with tick < target; notes at target fire on process. */
+	for (k = 0; k < s->ev.size() && s->ev[k].tick < tick; k++) {
 		if (s->ev[k].type != EV_NOTEON && s->ev[k].type != EV_NOTEOFF)
 			apply_ev(s, &s->ev[k]);
-		s->ev_i = k + 1;
 	}
+	s->ev_i = k;
 	s->cur_tick = tick;
 	return 0;
 }

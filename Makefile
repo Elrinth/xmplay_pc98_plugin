@@ -4,7 +4,7 @@
 # /usr/bin/make          # host tests + 32-bit DLL
 # /usr/bin/make dll      # dist/xmp-pc98.dll
 # /usr/bin/make test     # host render tests
-# /usr/bin/make pack     # xmp-pc98-1.0.27.zip
+# /usr/bin/make pack     # xmp-pc98-1.0.29.zip
 # /usr/bin/make scan     # dist/pc98-scan.exe (or host binary)
 # /usr/bin/make fetch-xml
 
@@ -127,6 +127,10 @@ $(DIST)/test_pc98_render: $(ROOT)/tests/test_pc98_render.c $(HOST_LIB)
 	mkdir -p $(DIST)
 	$(CXX) $(CXXFLAGS_L) $(INCS) -o $@ $^
 
+$(DIST)/test_mmd_carry: $(ROOT)/tests/test_mmd_carry.cpp $(HOST_LIB)
+	mkdir -p $(DIST)
+	$(CXX) $(CXXFLAGS_L) $(INCS) -o $@ $^
+
 $(DIST)/pc98-scan: $(SRC)/scan/pc98-scan.c $(HOST_LIB)
 	mkdir -p $(DIST)
 	$(CXX) $(CXXFLAGS_L) $(INCS) -o $@ $^
@@ -198,15 +202,16 @@ pack: dll
 	rm -rf $(DIST)/pack
 	mkdir -p $(DIST)/pack
 	cp -f $(DIST)/xmp-pc98.dll $(ROOT)/README.md $(ROOT)/LICENSE $(DIST)/pack/
-	-cp -f $(DIST)/pc98-scan.exe $(DIST)/pack/
-	-cp -f $(FMGEN)/readme.txt $(DIST)/pack/fmgen-readme.txt
-	rm -f $(DIST)/xmp-pc98-1.0.27.zip
-	powershell.exe -NoProfile -Command \
-		"Compress-Archive -Path '$(DIST)/pack/*' -DestinationPath '$(DIST)/xmp-pc98-1.0.27.zip' -Force"
+	rm -f $(DIST)/xmp-pc98-1.0.29.zip
+	python3 -c "import zipfile; from pathlib import Path; d=Path('$(DIST)'); z=d/'xmp-pc98-1.0.29.zip'; \
+	p=d/'pack'; z.unlink(missing_ok=True); \
+	zf=zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9); \
+	[zf.write(p/n,n) for n in ('xmp-pc98.dll','README.md','LICENSE')]; zf.close()"
 	rm -rf $(DIST)/pack
-	ls -l $(DIST)/xmp-pc98.dll $(DIST)/xmp-pc98-1.0.27.zip
+	ls -l $(DIST)/xmp-pc98.dll $(DIST)/xmp-pc98-1.0.29.zip
 
 clean:
 	rm -rf $(DIST)/xmp-pc98.dll $(DIST)/pc98-scan $(DIST)/pc98-scan.exe \
 		$(DIST)/test_s98_render $(DIST)/test_pmd_render $(DIST)/test_pc98_render \
-		$(DIST)/obj $(DIST)/obj-i686 $(DIST)/pack $(DIST)/xmp-pc98-1.0.27.zip
+		$(DIST)/test_mmd_carry \
+		$(DIST)/obj $(DIST)/obj-i686 $(DIST)/pack $(DIST)/xmp-pc98-1.0.29.zip

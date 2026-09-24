@@ -1422,12 +1422,10 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		char sf2[PC98_PATH_MAX];
 		if (fmd_find_sf2(cfg, filename, 0, sf2, sizeof sf2)) {
 			pc98_bounded(s->sf2_path, sizeof s->sf2_path, sf2);
-			/* Own a dedicated instance — shared FMD cache retains filter/voice
-			 * state across close/open and breaks chunk-identity tests. */
-			s->sf = tsf_load_filename(sf2);
+			/* Per-open tsf_copy of the cached SF2 — isolates voices without
+			 * reloading the multi‑MB sample bank. */
+			s->sf = (tsf *)fmd_font_open(sf2);
 			s->sf_owned = s->sf ? 1 : 0;
-			if (!s->sf)
-				s->sf = (tsf *)fmd_font_get(sf2);
 		}
 		/* Match FMD: modest headroom so dense GS scores don't clip/lag the mixer. */
 		if (s->sf)
@@ -1550,8 +1548,8 @@ void msdrv_close_h(void *h)
 	if (s->reg_log) { fclose(s->reg_log); s->reg_log = NULL; }
 	/* Shared TSF cache — must silence voices so the next open starts clean. */
 	if (s->sf) {
-		sf_silence(s->sf);
-		if (s->sf_owned) tsf_close(s->sf);
+		if (s->sf_owned) fmd_font_release(s->sf);
+		else sf_silence(s->sf);
 		s->sf = NULL; s->sf_owned = 0;
 	}
 	delete s->opna;
@@ -1735,7 +1733,21 @@ int msdrv_seek_ms_h(void *h, int ms)
 	clear_shadow(s);
 	if (s->opna) reset_chip(s);
 	if (s->opl) reset_opl(s);
-	if (s->sf) {
+	if (s->sf && s->sf_owned && s->sf2_path[0]) {
+		int c;
+		fmd_font_release(s->sf);
+		s->sf = (tsf *)fmd_font_open(s->sf2_path);
+		s->sf_owned = s->sf ? 1 : 0;
+		if (s->sf) {
+			tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
+			for (c = 0; c < 16; c++) {
+				tsf_channel_set_presetnumber(s->sf, c, 0, c == 9);
+				tsf_channel_midi_control(s->sf, c, 7, 100);
+				tsf_channel_midi_control(s->sf, c, 11, 127);
+				tsf_channel_midi_control(s->sf, c, 10, 64);
+			}
+		}
+	} else if (s->sf) {
 		int c;
 		tsf_note_off_all(s->sf);
 		tsf_reset(s->sf);
