@@ -33,6 +33,7 @@ struct pc98_player {
 	char filetype[32];
 	char engine[64];
 	char chip[64];
+	char rhythm[160];
 	char sf2[PC98_PATH_MAX];
 };
 
@@ -243,6 +244,7 @@ pc98_player *pc98_player_open(const char *filename, const uint8_t *data, size_t 
 		if (inf.engine[0]) pc98_bounded(p->engine, sizeof p->engine, inf.engine);
 		else pc98_bounded(p->engine, sizeof p->engine, "ymfm MsDRV");
 		pc98_bounded(p->chip, sizeof p->chip, msdrv_chip_name_h(p->eng));
+		pc98_bounded(p->rhythm, sizeof p->rhythm, msdrv_rhythm_source_h(p->eng));
 		pc98_bounded(p->sf2, sizeof p->sf2, msdrv_sf2_name_h(p->eng));
 	} else if (k == PC98_KIND_MSB) {
 		p->eng = msb_open_mem(filename, data, len, &p->cfg);
@@ -500,4 +502,5 @@ const char *pc98_player_game(const pc98_player *p) { return p ? p->game : ""; }
 const char *pc98_player_engine(const pc98_player *p) { return p ? p->engine : ""; }
 const char *pc98_player_chip(const pc98_player *p) { return p ? p->chip : ""; }
 const char *pc98_player_sf2(const pc98_player *p) { return p ? p->sf2 : ""; }
+const char *pc98_player_rhythm(const pc98_player *p) { return p ? p->rhythm : ""; }
 const char *pc98_player_filetype(const pc98_player *p) { return p ? p->filetype : ""; }

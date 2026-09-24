@@ -1,41 +1,41 @@
-# xmp-pc98 1.0.26
+# xmp-pc98 1.0.27
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.26.0**; `PLUGIN_XMPVER` **1002600**.
+VERSIONINFO **1.0.27.0**; `PLUGIN_XMPVER` **1002700**.
 
-## 1.0.26
+## 1.0.27
 
-- **Plugin File Info** (right-click → Plugin file info) now shows the same MsDRV
-  panel as Config channel mutes: Chip / Driver / Variant / SF2 plus live per-channel
-  mute checkboxes (FM, SSG, rhythm BD–RIM, OPL3 1–18, MIDI 1–16). Uses
-  `XMPIN_FLAG_OPTIONS` like xmp-gamemusic. Config → Channel mutes opens the same panel.
-- **EC_10_B2 poppy/silent drums (WAV path)**:
-  - ADPCM-A TL polarity matched ymfm (`atten = (vol^0x1F)+(tl^0x3F)`). Songs leave
-    `0x11=0x3F` (loud after XOR); the old `(0x3F-tl)` gain made WAV drums silent.
-  - Fixed `44100<<16` signed overflow → `step` was 0 so voices never advanced (attack
-    fade kept output at 0).
-  - Soft release (~8 ms) when a rhythm bit clears; short attack + end fades so WAV
-    tails/retriggers don't click. Play at true WAV rate. Drums-only peak ~6k,
-    jumps>8k = 0 (was silent / poppy).
-- **EC_10_N missing opening lead**: SSG was ~3 octaves low (`period = clk/(16*f)` and
-  no +12). Now `clk/(64*f)` plus MsDRV→SSG +12 octave so opening periods match
-  Unicorn (189/238/119). CH3 special lead later in the song was already OK in 1.0.25.
-- **EC_10_SB drums**: MSDRV4L writes `0xBD` once as **0** (OPL rhythm mode off). Kept.
-  Melodic/perc on normal OPL channels; A+B match reported with duplicate-write collapse.
+- **EC_10_SB drums**: OPL3 4-op CNT packing — primary CNT0 = tone byte0 bit1,
+  pair CNT1 = bit0 (was both on primary; FB=7 hats became additive white noise).
+- **EC_10_N**: PC-9801-26 SSG mix ≈ −8 dB (was OPNA −18 dB ÷8).
+- **Rhythm source** shown in File Info; ROM preferred over WAV; neither → silent.
+- Release zip is DLL+docs only (no `2608_*.WAV` / no ADPCM ROM).
 
-## 1.0.25
+- **Rhythm WAV path (EC_10_B2)**: volume law matches ymfm ADPCM-A
+  (`atten=(level^0x1F)+(tl^0x3F)`, then mul/shift) plus a small gain so peak/RMS
+  track the ROM render; playback at ADPCM-A rate (`clock/144`) with ROM-slot
+  length truncate; step advances at chip rate. Pan bits from `0x18..0x1D`.
+  Prefers `ym2608_adpcm_rom.bin` beside the DLL when present (ymfm ADPCM-A);
+  otherwise `2608_*.WAV` (fmgen/PMDWin packs). ROM path unchanged.
+- **EC_10_N**: SSG noise-period write `0x06=0` each update (matches MSDRV4L).
+  Opening lead remains SSG at `/64` +12 (1.0.26). Unicorn “drums” on N are
+  SSG tones (mixer keeps noise muted); the loud 1.0.25 “drums” were the
+  same SSG pitched ~3 octaves low.
 
-- CH3 special AA op masks; ADPCM-A key-on bit7 clear; OPL fine PB + held FNUM refresh.
 
 ## Install
 
-Copy `xmp-pc98.dll` next to `xmplay.exe`. Place `2608_*.WAV` beside the DLL (or set Rhythm path).
+Copy `xmp-pc98.dll` next to `xmplay.exe`.
+
+**OPNA rhythm (optional, not in the release zip):** `ym2608_adpcm_rom.bin` (preferred)
+or `2608_{BD,SD,TOP,HH,TOM,RIM}.WAV` beside the DLL / Rhythm path. If neither is
+found, OPNA drums are silent; File Info shows ROM / WAV / NONE.
 
 ## Build
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # or zip dist/pack → xmp-pc98-1.0.26.zip
+/usr/bin/make pack   # or zip dist/pack → xmp-pc98-1.0.27.zip
 ```

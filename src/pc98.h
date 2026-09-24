@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 #define PC98_PLUGIN_NAME    "PC-98 / S98"
-#define PC98_PLUGIN_VERSION "1.0.26"
-#define PC98_PLUGIN_XMPVER  1002600
+#define PC98_PLUGIN_VERSION "1.0.27"
+#define PC98_PLUGIN_XMPVER  1002700
 #define PC98_MAX_FILE       (16u * 1024u * 1024u)
 #define PC98_MAX_SONGS      256
 #define PC98_DEFAULT_RATE   44100
@@ -106,6 +106,7 @@ const char *pc98_player_game(const pc98_player *p);
 const char *pc98_player_engine(const pc98_player *p);
 const char *pc98_player_chip(const pc98_player *p);
 const char *pc98_player_sf2(const pc98_player *p);
+const char *pc98_player_rhythm(const pc98_player *p);
 const char *pc98_player_filetype(const pc98_player *p);
 
 int pc98_set_write(const char *path, const char *set_id, const char *title,

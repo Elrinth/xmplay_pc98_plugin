@@ -11,3 +11,10 @@ third_party/pmdmini/.git/
 third_party/pmdmini/.github/
 **/*.s98
 !tests/samples/**
+ym2608_adpcm_rom.bin
+**/ym2608_adpcm_rom.bin
+2608_*.WAV
+2608_*.wav
+/private-rom/
+__pycache__/
+tools/__pycache__/

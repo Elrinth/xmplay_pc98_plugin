@@ -312,7 +312,8 @@ static void WINAPI pc_About(HWND win)
 		"on PC-9801 / -8 on PC-8801), then interpolates to XMPlay.\r\n\r\n"
 		"Hoot: run pc98-scan to write set.pc98; first play may spawn\r\n"
 		"hootrip.exe and cache .s98 for leftover custom drivers.\r\n"
-		"Put 2608_*.WAV next to the DLL or set the rhythm path.\r\n"
+		"OPNA rhythm: ym2608_adpcm_rom.bin (preferred) or 2608_{BD,SD,TOP,HH,TOM,RIM}.WAV\r\n"
+		"next to the DLL / Rhythm path; without either, drums are silent.\r\n"
 		"WinFMP.dll is optional for .OPI/.FMD/.MMD.\r\n"
 		"Packed Oerstedia .GMD/.MMD use SC-55.sf2 and an MT-32/CM-64 SF2\r\n"
 		"from XMPlay's midi soundfonts folder (or gs_sf2 / mt_sf2 in the ini).\r\n"
@@ -356,6 +357,7 @@ static void open_chmute_dlg(HWND parent);
 #define IDC_INFO_DRV 1201
 #define IDC_INFO_VAR 1202
 #define IDC_INFO_SF2 1203
+#define IDC_INFO_RHY 1204
 #define IDC_OPEN_CFG 1090
 
 static pc98_cfg g_cfg_dlg_backup;
@@ -470,7 +472,7 @@ static INT_PTR CALLBACK chmute_dlg(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static void fill_msdrv_info_labels(HWND hwnd)
 {
-	const char *chip = "-", *drv = "MsDRV", *var = "-", *sf2 = "-";
+	const char *chip = "-", *drv = "MsDRV", *var = "-", *sf2 = "-", *rhy = "-";
 	char varbuf[64];
 	if (g_play && pc98_player_kind(g_play) == PC98_KIND_MSDRV) {
 		if (pc98_player_chip(g_play)[0]) chip = pc98_player_chip(g_play);
@@ -481,21 +483,26 @@ static void fill_msdrv_info_labels(HWND hwnd)
 		}
 		if (pc98_player_sf2(g_play)[0]) sf2 = pc98_player_sf2(g_play);
 		else sf2 = "(none)";
+		if (pc98_player_rhythm(g_play)[0]) rhy = pc98_player_rhythm(g_play);
+		else rhy = "(n/a)";
 	} else if (!g_play) {
 		chip = "(not playing)";
 		drv = "-";
 		var = "-";
 		sf2 = "-";
+		rhy = "-";
 	} else {
 		chip = pc98_player_chip(g_play)[0] ? pc98_player_chip(g_play) : pc98_player_engine(g_play);
 		drv = pc98_player_engine(g_play);
 		var = pc98_player_filetype(g_play);
 		sf2 = "(n/a)";
+		rhy = "(n/a)";
 	}
 	SetDlgItemTextA(hwnd, IDC_INFO_CHIP, chip);
 	SetDlgItemTextA(hwnd, IDC_INFO_DRV, drv);
 	SetDlgItemTextA(hwnd, IDC_INFO_VAR, var);
 	SetDlgItemTextA(hwnd, IDC_INFO_SF2, sf2);
+	SetDlgItemTextA(hwnd, IDC_INFO_RHY, rhy);
 }
 
 static INT_PTR CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -863,6 +870,8 @@ static void WINAPI pc_GetGeneralInfo(char *buf)
 		write_kv(&p, end, "Chip", pc98_player_chip(g_play));
 	if (pc98_player_sf2(g_play)[0])
 		write_kv(&p, end, "SF2", pc98_player_sf2(g_play));
+	if (pc98_player_rhythm(g_play)[0])
+		write_kv(&p, end, "Rhythm", pc98_player_rhythm(g_play));
 	if (pc98_player_songs(g_play) > 1) {
 		snprintf(num, sizeof num, "%d", pc98_player_songs(g_play));
 		write_kv(&p, end, "Tracks", num);

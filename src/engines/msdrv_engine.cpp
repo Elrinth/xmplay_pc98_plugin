@@ -93,6 +93,7 @@ struct ms_state {
 	int last_l, last_r;
 	int prev_l, prev_r;          /* linear-resample history */
 	uint32_t chip_clock;         /* YM2203 3.9936M or YM2608 7.9872M */
+	uint32_t chip_rate;          /* ymfm generate rate (OPNA ~55467) */
 	int skip_audio;              /* seek: advance seq+regs, skip generate */
 	uint8_t sh_opn[2][256];
 	uint8_t sh_opn_set[2][256];
@@ -108,11 +109,12 @@ struct ms_state {
 	int saw_inf_loop;
 	int ch3_special;             /* A9: OPN/OPNA CH3 special/effect mode */
 	uint8_t ch3_key_slots;       /* currently keyed Special-FM3 op bits 0..3 */
-	uint8_t adpcm_tl;            /* ADPCM-A total level reg 0x11 (0=loud) */
+	uint8_t adpcm_tl;            /* ADPCM-A TL reg 0x11; ymfm uses tl^0x3F (0x3F=loud) */
 	int mono;                    /* OPN: force L=R */
 	/* Software ADPCM-A rhythm (when ROM missing) — 6 voices from 2608_*.WAV */
-	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol, fade, fade_max; } rhy[6];
+	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol, pan, fade, fade_max; } rhy[6];
 	int rhy_have_wav;
+	int rhy_src; /* 0=none 1=ROM 2=WAV */
 	std::vector<uint8_t> rhy_rom;
 	/* Optional register log for tools/msdrv_reglog */
 	FILE *reg_log;
@@ -127,9 +129,9 @@ struct ms_state {
 		  tempo_mod(0x40), mute_fm(0), mute_ssg(0), mute_rhythm(0),
 		  mute_fm_mask(0), mute_ssg_mask(0), mute_rhy_mask(0), mute_opl_mask(0), mute_midi_mask(0),
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
-		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), skip_audio(0),
+		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), chip_rate(55467), skip_audio(0),
 		  tsf_fifo_pos(0), tsf_fifo_len(0),
-		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), ch3_key_slots(0), adpcm_tl(0x3F), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0), opl4_mask(0)
+		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), ch3_key_slots(0), adpcm_tl(0x3F), mono(0), rhy_have_wav(0), rhy_src(0), reg_log(NULL), reg_tick(0), opl4_mask(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
 		memset(trk, 0, sizeof trk);
@@ -381,6 +383,7 @@ static void ssg_on(ms_state *s, ms_trk *t, int note)
 	wr(s, (uint8_t)(c * 2), (uint8_t)(per & 0xFF));
 	wr(s, (uint8_t)(c * 2 + 1), (uint8_t)((per >> 8) & 0x0F));
 	wr(s, (uint8_t)(0x08 + c), (uint8_t)vol);
+	wr(s, 0x06, 0); /* MSDRV4L writes noise period each SSG update */
 	s->ssg_mix = (uint8_t)((s->ssg_mix & ~(1 << c)) | (8 << c));
 	wr(s, 0x07, s->ssg_mix);
 	t->keyed = 1;
@@ -454,12 +457,21 @@ static void apply_opl(ms_state *s, ms_trk *t)
 	/* Primaries 0..2 (and 9..11) own 4-op pairs with ch+3; 6..8 stay 2-op. */
 	use4 = (ch < 3);
 	nops = use4 ? 4 : 2;
-	/* MST: fb in D5..D3, cnt in D0. OPL 0xC0 wants FB in D3..D1, CNT in D0,
-	 * plus stereo enables in D5..D4 for OPL3. */
-	fb_cnt = (uint8_t)((((v[0] & 0x38) >> 2) & 0x0E) | (v[0] & 0x01));
-	pan = 0x30;
-	cnt0 = (uint8_t)(fb_cnt & 1);
-	cnt1 = 0; /* MSDRV4L writes pair C0 as pan only (FB/CNT=0) */
+	/* MST byte0 mirrors OPN (FB<<3)|ALG. OPL 0xC0 wants FB in D3..D1.
+	 * 2-op: CNT = byte0 D0. 4-op: CNT0 (primary) = D1, CNT1 (pair) = D0 —
+	 * matching MSDRV4L (FB=7 hats were CNT-swapped into additive noise). */
+	{
+		uint8_t fb = (uint8_t)(((v[0] & 0x38) >> 2) & 0x0E);
+		pan = 0x30;
+		if (use4) {
+			cnt0 = (uint8_t)((v[0] >> 1) & 1);
+			cnt1 = (uint8_t)(v[0] & 1);
+		} else {
+			cnt0 = (uint8_t)(v[0] & 1);
+			cnt1 = 0;
+		}
+		fb_cnt = (uint8_t)(fb | cnt0);
+	}
 	if (use4) {
 		uint8_t mask_bit = (uint8_t)(1u << (port ? (3 + ch) : ch));
 		if (!(s->opl4_mask & mask_bit)) {
@@ -859,8 +871,11 @@ static void trk_step(ms_state *s, int ti, int dry)
 		if (!dry && !s->mute_rhythm) {
 			/* ADPCM-A pan/level regs 0x18..0x1D */
 			wr(s, (uint8_t)(0x18 + idx), d[pc + 1]);
-			if (s->rhy_have_wav)
+			if (s->rhy_have_wav) {
 				s->rhy[idx].vol = d[pc + 1] & 0x1F;
+				s->rhy[idx].pan = (d[pc + 1] >> 6) & 3;
+				if (s->rhy[idx].pan == 0) s->rhy[idx].pan = 3;
+			}
 		}
 		t->pc = pc + 2; break;
 	}
@@ -890,11 +905,12 @@ static void trk_step(ms_state *s, int ti, int dry)
 			uint8_t mask = (uint8_t)((d[pc + 2] & 0x3F) & ~(uint8_t)s->mute_rhy_mask);
 			if (mask) {
 				/* YM2608 ADPCM-A 0x10: bit7=Dump(1)/KeyOn(0), bits5-0=mask.
-				 * MSDRV4L writes mask with bit7 clear to key on; 0 to release. */
-				wr(s, 0x10, mask);
+				 * MSDRV4L writes mask with bit7 clear to key on; 0 to release.
+				 * WAV fallback: skip chip key-on (no ROM → empty ADPCM reads). */
+				if (s->iface.rom_n) wr(s, 0x10, mask);
 				rhy_hit(s, mask);
 			} else {
-				wr(s, 0x10, 0x00); /* MSDRV4L clears 0x10 to release */
+				if (s->iface.rom_n) wr(s, 0x10, 0x00);
 				rhy_hit(s, 0);     /* stop WAV voices */
 			}
 		}
@@ -1085,6 +1101,17 @@ static int load_wav16(const char *path, std::vector<int16_t> *pcm, int *rate_out
 	return 1;
 }
 
+static void join_rhythm_path(char *out, size_t n, const char *dir, const char *file)
+{
+	size_t dlen;
+	if (!dir || !dir[0]) { out[0] = 0; return; }
+	dlen = strlen(dir);
+	if (dir[dlen - 1] == '/' || dir[dlen - 1] == '\\')
+		snprintf(out, n, "%s%s", dir, file);
+	else
+		snprintf(out, n, "%s/%s", dir, file);
+}
+
 static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
 {
 	static const char *names[6] = {
@@ -1098,22 +1125,21 @@ static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
 	char dir[PC98_PATH_MAX], path[PC98_PATH_MAX];
 	FILE *fp;
 	int i, got = 0, rate;
+	s->rhy_have_wav = 0;
+	s->rhy_src = 0;
+	s->iface.rom = NULL;
+	s->iface.rom_n = 0;
+	s->rhy_rom.clear();
 	dir[0] = 0;
 	if (cfg && cfg->rhythm_path[0])
 		pc98_bounded(dir, sizeof dir, cfg->rhythm_path);
 	else if (cfg && cfg->dll_dir[0])
 		pc98_bounded(dir, sizeof dir, cfg->dll_dir);
 	if (!dir[0]) return;
-	/* Prefer a raw ADPCM-A ROM if present (same as PMD/fmgen). */
-	snprintf(path, sizeof path, "%s%cym2608_adpcm_rom.bin", dir,
-		(dir[strlen(dir)-1] == '/' || dir[strlen(dir)-1] == '\\') ? 0 : '/');
-	if (path[strlen(path)-1] == 0) /* path had trailing slash already handled poorly */
-		snprintf(path, sizeof path, "%sym2608_adpcm_rom.bin", dir);
+
+	/* Prefer ym2608_adpcm_rom.bin — ymfm ADPCM-A (reference quality). */
+	join_rhythm_path(path, sizeof path, dir, "ym2608_adpcm_rom.bin");
 	fp = fopen(path, "rb");
-	if (!fp) {
-		snprintf(path, sizeof path, "%s/ym2608_adpcm_rom.bin", dir);
-		fp = fopen(path, "rb");
-	}
 	if (fp) {
 		fseek(fp, 0, SEEK_END);
 		long sz = ftell(fp);
@@ -1123,57 +1149,58 @@ static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
 			if (fread(s->rhy_rom.data(), 1, (size_t)sz, fp) == (size_t)sz) {
 				s->iface.rom = s->rhy_rom.data();
 				s->iface.rom_n = s->rhy_rom.size();
+				s->rhy_src = 1;
+			} else {
+				s->rhy_rom.clear();
 			}
 		}
 		fclose(fp);
-		if (s->iface.rom_n) return;
+		if (s->rhy_src == 1) return;
 	}
+
+	/* Fallback: 2608_*.WAV (fmgen/PMDWin packs). Headers often say 44100 but
+	 * content matches ADPCM-A at clock/144; play at that rate and truncate to
+	 * the YM2608 ROM slot length (WAVs are typically 3–7× longer). */
+	static const int rom_bytes[6] = {
+		0x01c0, 0x0280, 0x1740, 0x0180, 0x0280, 0x0080
+	};
 	for (i = 0; i < 6; i++) {
-		snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+		int adpcm_n, max_n, adpcm_hz;
+		join_rhythm_path(path, sizeof path, dir, names[i]);
 		if (!load_wav16(path, &s->rhy[i].pcm, &rate)) {
-			snprintf(path, sizeof path, "%s/%s", dir, names_lo[i]);
+			join_rhythm_path(path, sizeof path, dir, names_lo[i]);
 			if (!load_wav16(path, &s->rhy[i].pcm, &rate))
 				continue;
 		}
-		s->rhy[i].rate = rate;
+		(void)rate;
+		adpcm_hz = (int)(MS_CLOCK_OPNA / 144u); /* ~55466 */
+		adpcm_n = rom_bytes[i] * 2;
+		max_n = adpcm_n;
+		if (max_n < 32) max_n = 32;
+		if ((int)s->rhy[i].pcm.size() > max_n)
+			s->rhy[i].pcm.resize((size_t)max_n);
+		s->rhy[i].rate = adpcm_hz;
 		s->rhy[i].vol = 0x1F;
+		s->rhy[i].pan = 3;
 		s->rhy[i].on = 0;
 		s->rhy[i].fade = 0;
 		s->rhy[i].fade_max = 0;
 		got++;
 	}
-	/* Also try risingdaw-refs bundled path */
-	if (got < 6) {
-		const char *alt = "/workspace/risingdaw-refs/x68-drums/ym2608";
-		got = 0;
-		for (i = 0; i < 6; i++) {
-			snprintf(path, sizeof path, "%s/%s", alt, names_lo[i]);
-			if (load_wav16(path, &s->rhy[i].pcm, &rate)) {
-				s->rhy[i].rate = rate;
-				s->rhy[i].vol = 0x1F;
-				s->rhy[i].on = 0;
-				got++;
-			}
-		}
-	}
 	s->rhy_have_wav = (got == 6);
+	if (s->rhy_have_wav) s->rhy_src = 2;
 }
 
 static void rhy_hit(ms_state *s, uint8_t mask)
 {
 	int i;
 	int host = s->rate > 0 ? s->rate : 44100;
-	/* Bundled 2608_*.WAV are true 44.1 kHz recordings of ADPCM-A drums.
-	 * Play at the WAV rate (not chip/432) so pitch matches the dump; chip-rate
-	 * stepping stretched them and left non-zero tails that clicked on stop. */
-	if (!s->rhy_have_wav || s->iface.rom_n) {
-		return;
-	}
-	/* Soft-stop any channel whose bit is clear (release or remask). */
+	/* ROM path: ymfm ADPCM-A handles key-on via reg 0x10. */
+	if (!s->rhy_have_wav || s->iface.rom_n) return;
 	for (i = 0; i < 6; i++) {
 		if (mask & (1 << i)) continue;
 		if (s->rhy[i].on && s->rhy[i].fade == 0) {
-			s->rhy[i].fade_max = host / 125; /* ~8 ms */
+			s->rhy[i].fade_max = host / 125;
 			if (s->rhy[i].fade_max < 32) s->rhy[i].fade_max = 32;
 			s->rhy[i].fade = s->rhy[i].fade_max;
 		}
@@ -1188,8 +1215,11 @@ static void rhy_hit(ms_state *s, uint8_t mask)
 		s->rhy[i].fade = 0;
 		s->rhy[i].fade_max = 0;
 		s->rhy[i].pos = 0;
-		/* 44100<<16 overflows int32 → step 0 → silent drums. */
-		s->rhy[i].step = (int)(((int64_t)src_hz << 16) / host);
+		/* rhy_mix runs at chip_rate (~55467), not host rate — step vs chip. */
+		{
+			int chip_hz = s->chip_rate > 0 ? (int)s->chip_rate : 55467;
+			s->rhy[i].step = (int)(((int64_t)src_hz << 16) / chip_hz);
+		}
 		if (s->rhy[i].step < 1) s->rhy[i].step = 1;
 		s->rhy[i].end = (int)((int64_t)s->rhy[i].pcm.size() << 16);
 	}
@@ -1198,10 +1228,10 @@ static void rhy_hit(ms_state *s, uint8_t mask)
 static void rhy_mix(ms_state *s, int *l, int *r)
 {
 	int i;
-	int tl = s->adpcm_tl & 0x3F; /* 0=loudest, 63=silent; 0.75 dB/step */
+	int tl = s->adpcm_tl & 0x3F;
 	if (!s->rhy_have_wav || s->iface.rom_n) return;
 	for (i = 0; i < 6; i++) {
-		int sample, vol, atten, level, idx, remain, pos_samp;
+		int sample, vol, atten, mul, shift, idx, remain, pos_samp, pan;
 		if (!s->rhy[i].on) continue;
 		if (s->rhy[i].pos >= s->rhy[i].end) {
 			s->rhy[i].on = 0;
@@ -1210,15 +1240,18 @@ static void rhy_mix(ms_state *s, int *l, int *r)
 		}
 		idx = s->rhy[i].pos >> 16;
 		sample = s->rhy[i].pcm[(size_t)idx];
-		vol = s->rhy[i].vol & 0x1F; /* 0x18..0x1D low 5 bits */
-		/* ymfm: atten = (level^0x1F)+(tl^0x3F); 0=loud. Songs leave TL=0x3F. */
+		vol = s->rhy[i].vol & 0x1F;
 		atten = (vol ^ 0x1F) + (tl ^ 0x3F);
 		if (atten >= 63) {
 			s->rhy[i].pos += s->rhy[i].step;
 			continue;
 		}
-		level = 63 - atten;
-		sample = (sample * level) / (63 * 2); /* /2 stacked-hit headroom */
+		mul = 15 - (atten & 7);
+		shift = 5 + (atten >> 3);
+		sample = (sample * mul) >> shift;
+		/* WAV packs sit ~9 dB below ymfm ADPCM-A at the same atten; boost
+		 * (~+7.8 dB) so peak/RMS track the ROM path on EC_10_B2. */
+		sample = (sample * 39) / 16;
 		pos_samp = s->rhy[i].pos >> 16;
 		if (pos_samp < 32)
 			sample = (sample * (pos_samp + 1)) / 32;
@@ -1233,8 +1266,10 @@ static void rhy_mix(ms_state *s, int *l, int *r)
 				s->rhy[i].fade = 0;
 			}
 		}
-		*l += sample;
-		*r += sample;
+		pan = s->rhy[i].pan & 3;
+		if (pan == 0) pan = 3;
+		if (pan & 1) *l += sample;
+		if (pan & 2) *r += sample;
 		s->rhy[i].pos += s->rhy[i].step;
 	}
 }
@@ -1403,6 +1438,7 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		sr = s->opl->sample_rate(MS_OPL_CLOCK);
 		if (sr == 0) sr = 49716;
 		s->chip_clock = MS_OPL_CLOCK;
+		s->chip_rate = sr;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_opl(s);
 	} else if (s->variant == 0) {
@@ -1413,6 +1449,7 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		s->opn_chip = new ymfm::ym2203(s->iface);
 		sr = s->opn_chip->sample_rate(s->chip_clock);
 		if (sr == 0) sr = 27733;
+		s->chip_rate = sr;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_chip(s);
 	} else {
@@ -1422,6 +1459,7 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		s->opna = new ymfm::ym2608(s->iface);
 		sr = s->opna->sample_rate(s->chip_clock);
 		if (sr == 0) sr = 55467;
+		s->chip_rate = sr;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_chip(s);
 		load_rhythm(s, cfg);
@@ -1633,7 +1671,8 @@ int msdrv_process_h(void *h, float *buf, int count)
 							ssg = s->opn_out.data[1];
 							if (s->mute_fm) fm = 0;
 							if (s->mute_ssg) ssg = 0;
-							ssg = ssg / 8;
+							/* PC-9801-26: SSG nearer FM (in_s98 VolumeSSG66≈−8 dB). */
+							ssg = (ssg * 5) / 13;
 							m = fm + ssg;
 							s->last_l = s->last_r = m; /* YM2203 mono → both speakers */
 						} else if (s->opna) {
@@ -1818,6 +1857,16 @@ const char *msdrv_chip_name_h(void *h)
 	if (s->variant == 1) return "YM2608 OPNA";
 	if (s->variant == 2) return "GS MIDI (SF2)";
 	return "YMF262 OPL3";
+}
+
+const char *msdrv_rhythm_source_h(void *h)
+{
+	ms_state *s = (ms_state *)h;
+	if (!s) return "n/a";
+	if (s->variant != 1) return "n/a (OPNA only)";
+	if (s->rhy_src == 1) return "ym2608_adpcm_rom.bin (ymfm ADPCM-A)";
+	if (s->rhy_src == 2) return "2608_*.WAV (PCM fallback)";
+	return "NONE — place ym2608_adpcm_rom.bin or 2608_{BD,SD,TOP,HH,TOM,RIM}.WAV next to the DLL";
 }
 
 int msdrv_variant_h(void *h)
