@@ -40,8 +40,9 @@ static const uint8_t k_car[8] = {
 	0x08, 0x08, 0x08, 0x08, 0x0A, 0x0E, 0x0E, 0x0F
 };
 static const int k_fnum[12] = {
-	0x269, 0x28E, 0x2B4, 0x2DE, 0x30A, 0x338,
-	0x369, 0x39C, 0x3D3, 0x40E, 0x44B, 0x48D
+	/* MSDRV4L / MFD table (matches Unicorn EC_10 capture) */
+	0x26A, 0x28F, 0x2B6, 0x2DF, 0x30B, 0x339,
+	0x36A, 0x39E, 0x3D5, 0x410, 0x44E, 0x48F
 };
 
 class ms_iface : public ymfm::ymfm_interface {
@@ -112,6 +113,7 @@ struct ms_state {
 	/* Optional register log for tools/msdrv_reglog */
 	FILE *reg_log;
 	uint32_t reg_tick;
+	uint8_t opl4_mask; /* OPL3 reg 0x104 4-op connection bits */
 	char title[256];
 
 	ms_state()
@@ -121,7 +123,7 @@ struct ms_state {
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
 		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), skip_audio(0),
 		  tsf_fifo_pos(0), tsf_fifo_len(0),
-		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0)
+		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0), opl4_mask(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
 		memset(trk, 0, sizeof trk);
@@ -255,17 +257,15 @@ static void apply_fm(ms_state *s, ms_trk *t)
 	}
 	wrx(s, ext, (uint8_t)(0xB0 + slot), (uint8_t)(pat[0] & 0x3F));
 	/* 9F raw: 00=centre(C0), 01..7F=right(40), 80..FF=left(80).
-	 * OPN (variant 0) is mono — always both LR enables. */
-	if (s->variant == 0)
-		pan = 0xC0;
-	else {
+	 * YM2203 has no B4; MSDRV4L does not write it per-note on OPN. */
+	if (s->variant != 0) {
 		int pp = t->pan & 0xFF;
 		if (pp == 0) pan = 0xC0;
 		else if (pp & 0x80) pan = 0x80;
 		else pan = 0x40;
+		pan |= (pat[0x23] & 0x37);
+		wrx(s, ext, (uint8_t)(0xB4 + slot), (uint8_t)pan);
 	}
-	pan |= (pat[0x23] & 0x37);
-	wrx(s, ext, (uint8_t)(0xB4 + slot), (uint8_t)pan);
 }
 
 static int fm_key(int hw)
@@ -287,10 +287,9 @@ static void fm_on(ms_state *s, ms_trk *t, int note)
 	if (fnote < 0) fnote = 0;
 	if (fnote > 127) fnote = 127;
 	n = fnote % 12;
-	/* k_fnum is calibrated for ~4 MHz (26K YM2203). Hardware:
-	 * Fout = clock/144 * FNUM * 2^(BLOCK-1) / 2^20.
-	 * OPN @ 3.9936 MHz → BLOCK = note/12 - 1; OPNA @ 7.9872 MHz → note/12 - 2. */
-	blk = fnote / 12 - (s->variant == 0 ? 1 : 2);
+	/* k_fnum matches MSDRV4L. Driver writes the same BLOCK for OPN and OPNA
+	 * (OPNA default /6 prescaler → OPN-equivalent FM rate). */
+	blk = fnote / 12 - 1;
 	if (blk < 0) blk = 0;
 	if (blk > 7) blk = 7;
 	fn = k_fnum[n] + t->detune;
@@ -383,8 +382,10 @@ static void reset_opl(ms_state *s)
 	int i;
 	if (!s->opl) return;
 	s->opl->reset();
+	s->opl4_mask = 0;
 	/* Enable OPL3 mode + wave select */
 	opl_wr(s, 1, 0x05, 0x01); /* OPL3 NEW */
+	opl_wr(s, 1, 0x04, 0x00); /* clear 4-op connections */
 	opl_wr(s, 0, 0x01, 0x20); /* waveform select enable */
 	opl_wr(s, 0, 0x08, 0x00);
 	opl_wr(s, 0, 0xBD, 0x00); /* no OPL rhythm / percussion mode */
@@ -401,8 +402,15 @@ static void reset_opl(ms_state *s)
 static void apply_opl(ms_state *s, ms_trk *t)
 {
 	const uint8_t *v;
-	int port, ch, sm, sc, vol_tl, i;
-	uint8_t fb_cnt, pan;
+	int port, ch, vol_tl, i, nops, use4;
+	uint8_t fb_cnt, pan, cnt0, cnt1;
+	/* 4-op carrier masks indexed by (CNT1<<1)|CNT0 (OPL3 handbook). */
+	static const uint8_t k_car4[4] = {
+		0x08, /* 00: op4 */
+		0x0A, /* 01: op2+op4 */
+		0x09, /* 10: op1+op4 */
+		0x0B  /* 11: op1+op2+op4 */
+	};
 	if (!s->opl || t->kind != CK_OPL || t->hw < 0 || t->hw > 17) return;
 	if (s->opn.size() < (size_t)(t->inst + 1) * MS_OPN_SZ) return;
 	v = s->opn.data() + t->inst * MS_OPN_SZ;
@@ -410,34 +418,52 @@ static void apply_opl(ms_state *s, ms_trk *t)
 	if (v[0x2F] != 1) return;
 	port = t->hw >= 9 ? 1 : 0;
 	ch = t->hw % 9;
-	sm = k_opl_slot[ch];
-	sc = sm + 3;
+	/* Primaries 0..2 (and 9..11) own 4-op pairs with ch+3; 6..8 stay 2-op. */
+	use4 = (ch < 3);
+	nops = use4 ? 4 : 2;
 	/* MST: fb in D5..D3, cnt in D0. OPL 0xC0 wants FB in D3..D1, CNT in D0,
 	 * plus stereo enables in D5..D4 for OPL3. */
 	fb_cnt = (uint8_t)((((v[0] & 0x38) >> 2) & 0x0E) | (v[0] & 0x01));
 	pan = 0x30;
+	cnt0 = (uint8_t)(fb_cnt & 1);
+	cnt1 = 0; /* MSDRV4L writes pair C0 as pan only (FB/CNT=0) */
+	if (use4) {
+		uint8_t mask_bit = (uint8_t)(1u << (port ? (3 + ch) : ch));
+		if (!(s->opl4_mask & mask_bit)) {
+			s->opl4_mask |= mask_bit;
+			opl_wr(s, 1, 0x04, s->opl4_mask);
+		}
+	}
 	opl_wr(s, port, (uint8_t)(0xC0 + ch), (uint8_t)(pan | fb_cnt));
-	for (i = 0; i < 2; i++) {
-		int slot = i ? sc : sm;
-		int o = i; /* op1 / op2 in file */
-		uint8_t mult = v[1 + o] & 0x0F;
+	if (use4)
+		opl_wr(s, port, (uint8_t)(0xC0 + ch + 3), (uint8_t)(pan | cnt1));
+	for (i = 0; i < nops; i++) {
+		int ch_op = use4 ? (ch + (i >= 2 ? 3 : 0)) : ch;
+		int slot = k_opl_slot[ch_op % 9] + (i & 1) * 3;
+		uint8_t mult = v[1 + i] & 0x0F;
 		/* MST packs TL in D6..D1 (D0 unused) — shift into OPL's 6-bit TL. */
-		uint8_t tl = (uint8_t)((v[5 + o] >> 1) & 0x3F);
-		uint8_t ks_ar = v[9 + o];
-		uint8_t am_dr = v[0x0D + o];
-		uint8_t vib_ws = v[0x11 + o];
-		uint8_t sl_rr = v[0x15 + o];
+		uint8_t tl = (uint8_t)((v[5 + i] >> 1) & 0x3F);
+		uint8_t ks_ar = v[9 + i];
+		uint8_t am_dr = v[0x0D + i];
+		uint8_t vib_ws = v[0x11 + i];
+		uint8_t sl_rr = v[0x15 + i];
 		/* File: vib@D5 egt@D4 ksr@D3 ws@D2..0 → OPL 0x20: AM VIB EGT KSR MULT */
 		uint8_t r20 = (uint8_t)((am_dr & 0x80) |
 			((vib_ws & 0x20) ? 0x40 : 0) |
 			((vib_ws & 0x10) ? 0x20 : 0) |
 			((vib_ws & 0x08) ? 0x10 : 0) | mult);
-		/* Volume: attenuate carrier (op2) only; keep some headroom. */
 		vol_tl = tl;
-		if (i == 1) {
-			int add = (127 - (t->vol & 127)) * 48 / 127;
-			vol_tl = tl + add;
-			if (vol_tl > 0x3F) vol_tl = 0x3F;
+		{
+			int is_car;
+			if (use4)
+				is_car = k_car4[(cnt1 << 1) | cnt0] & (1 << i);
+			else
+				is_car = (i == 1);
+			if (is_car) {
+				int add = (127 - (t->vol & 127)) * 48 / 127;
+				vol_tl = tl + add;
+				if (vol_tl > 0x3F) vol_tl = 0x3F;
+			}
 		}
 		uint8_t r40 = (uint8_t)((ks_ar & 0xC0) | (vol_tl & 0x3F));
 		/* AR in D4..D1 of ks_ar; DR in D4..D1 of am_dr (D0 unused each). */
@@ -630,6 +656,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 		if (!dry && !s->skip_audio && t->kind == CK_MIDI && s->sf)
 			tsf_channel_midi_control(s->sf, t->hw, 7, t->vol);
 		if (!dry && t->keyed && t->kind == CK_FM) apply_fm(s, t);
+		if (!dry && t->keyed && t->kind == CK_OPL) apply_opl(s, t);
 		if (!dry && t->keyed && t->kind == CK_SSG) {
 			int v = t->vol / 8; if (v > 15) v = 15;
 			wr(s, (uint8_t)(0x08 + t->hw), (uint8_t)v);
