@@ -1,4 +1,4 @@
-# xmp-pc98 1.0.21
+# xmp-pc98 1.0.22
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
@@ -7,10 +7,10 @@ This is **not** a wrap of S98Amp / `in_s98.dll`, `in_fmpmd.dll`, or ZXTune.
 Same rule as xmp-gamemusic (“does not wrap `in_nez.dll`”).
 
 Classic XMPlay is **32-bit only**. This DLL is PE32 i386.
-VERSIONINFO FILEVERSION is **1.0.21.0**; `PLUGIN_XMPVER` is **1002100**.
+VERSIONINFO FILEVERSION is **1.0.22.0**; `PLUGIN_XMPVER` is **1002200**.
 
 
-## 1.0.21
+## 1.0.22
 
 MsDRV4 polish after 1.0.20 feedback (`EC_10_*`):
 
@@ -122,7 +122,7 @@ make          # tests + dll
 make test
 make dll
 make scan
-make pack     # dist/xmp-pc98-1.0.21.zip
+make pack     # dist/xmp-pc98-1.0.22.zip
 make fetch-xml
 ```
 

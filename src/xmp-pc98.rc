@@ -14,12 +14,12 @@ BEGIN
 		BEGIN
 			VALUE "CompanyName", "Elrinth"
 			VALUE "FileDescription", "XMPlay PC-98 / S98 input plugin"
-			VALUE "FileVersion", "1.0.21"
+			VALUE "FileVersion", "1.0.22"
 			VALUE "InternalName", "xmp-pc98.dll"
 			VALUE "LegalCopyright", "GPLv2+ (pmdmini / ymfm / fmgen)"
 			VALUE "OriginalFilename", "xmp-pc98.dll"
 			VALUE "ProductName", "xmp-pc98"
-			VALUE "ProductVersion", "1.0.21"
+			VALUE "ProductVersion", "1.0.22"
 		END
 	END
 	BLOCK "VarFileInfo"

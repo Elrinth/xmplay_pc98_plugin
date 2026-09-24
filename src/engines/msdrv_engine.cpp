@@ -46,7 +46,15 @@ static const int k_fnum[12] = {
 
 class ms_iface : public ymfm::ymfm_interface {
 public:
-	uint8_t ymfm_external_read(ymfm::access_class, uint32_t) override { return 0; }
+	const uint8_t *rom;
+	size_t rom_n;
+	ms_iface() : rom(NULL), rom_n(0) {}
+	uint8_t ymfm_external_read(ymfm::access_class type, uint32_t address) override
+	{
+		if (type == ymfm::ACCESS_ADPCM_A && rom && address < rom_n)
+			return rom[address];
+		return 0;
+	}
 };
 
 struct ms_trk {
@@ -69,6 +77,8 @@ struct ms_state {
 	ms_iface iface;
 	ymfm::ym2608 *opna;
 	ymfm::ym2608::output_data out;
+	ymfm::ym2203 *opn_chip; /* true YM2203 for _N (mono) */
+	ymfm::ym2203::output_data opn_out;
 	ymfm::ymf262 *opl;
 	ymfm::ymf262::output_data opl_out;
 	tsf *sf;
@@ -93,16 +103,25 @@ struct ms_state {
 	int variant; /* 0 OPN, 1 OPNA, 2 MIDI, 3 OPL */
 	int loop_hit;
 	int saw_inf_loop;
+	int ch3_special;             /* A9: OPN/OPNA CH3 special/effect mode */
+	int mono;                    /* OPN: force L=R */
+	/* Software ADPCM-A rhythm (when ROM missing) — 6 voices from 2608_*.WAV */
+	struct { std::vector<int16_t> pcm; int rate; int pos, step, end, on, vol; } rhy[6];
+	int rhy_have_wav;
+	std::vector<uint8_t> rhy_rom;
+	/* Optional register log for tools/msdrv_reglog */
+	FILE *reg_log;
+	uint32_t reg_tick;
 	char title[256];
 
 	ms_state()
-		: opna(NULL), opl(NULL), sf(NULL), sf_owned(0), rate(PC98_DEFAULT_RATE), loops_want(1),
+		: opna(NULL), opn_chip(NULL), opl(NULL), sf(NULL), sf_owned(0), rate(PC98_DEFAULT_RATE), loops_want(1),
 		  one_loop_ms(0), ended(0), song_ended(0), tempo(120), timebase(48),
 		  tempo_mod(0x40), mute_fm(0), mute_ssg(0), mute_rhythm(0),
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
 		  prev_l(0), prev_r(0), chip_clock(MS_CLOCK_OPNA), skip_audio(0),
 		  tsf_fifo_pos(0), tsf_fifo_len(0),
-		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0)
+		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0), ch3_special(0), mono(0), rhy_have_wav(0), reg_log(NULL), reg_tick(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
 		memset(trk, 0, sizeof trk);
@@ -111,6 +130,10 @@ struct ms_state {
 		title[0] = 0;
 	}
 };
+
+static void rhy_hit(ms_state *s, uint8_t mask);
+static void rhy_mix(ms_state *s, int *l, int *r);
+static void load_rhythm(ms_state *s, const pc98_cfg *cfg);
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -172,12 +195,30 @@ static int hw_of(int id, int kind)
 	return 0;
 }
 
+static void log_reg(ms_state *s, const char *chip, int port, uint8_t aa, uint8_t dd)
+{
+	if (!s->reg_log) return;
+	fprintf(s->reg_log, "%u %s %d %02X %02X\n", s->reg_tick, chip, port, aa, dd);
+}
+
 static void wrx(ms_state *s, int ext, uint8_t aa, uint8_t dd)
 {
 	int p = ext ? 1 : 0;
 	s->sh_opn[p][aa] = dd;
 	s->sh_opn_set[p][aa] = 1;
-	if (!s->opna || s->skip_audio) return;
+	if (s->skip_audio) {
+		log_reg(s, s->opn_chip ? "OPN" : "OPNA", p, aa, dd);
+		return;
+	}
+	if (s->opn_chip) {
+		if (ext) return; /* YM2203 has no extended port */
+		log_reg(s, "OPN", 0, aa, dd);
+		s->opn_chip->write(0, aa);
+		s->opn_chip->write(1, dd);
+		return;
+	}
+	if (!s->opna) return;
+	log_reg(s, "OPNA", p, aa, dd);
 	if (ext) { s->opna->write(2, aa); s->opna->write(3, dd); }
 	else { s->opna->write(0, aa); s->opna->write(1, dd); }
 }
@@ -190,7 +231,8 @@ static void apply_fm(ms_state *s, ms_trk *t)
 {
 	const uint8_t *pat;
 	int c = t->hw, ext, slot, i, alg, mask, atten, tl, pan;
-	if (!s->opna || c < 0 || c > 5) return;
+	if ((!s->opna && !s->opn_chip) || c < 0 || c > 5) return;
+	if (s->opn_chip && c > 2) return; /* YM2203: 3 FM only */
 	if (s->opn.size() < (size_t)(t->inst + 1) * MS_OPN_SZ) return;
 	pat = &s->opn[(size_t)t->inst * MS_OPN_SZ];
 	if (pat[0x2F] != 0) return;
@@ -212,11 +254,16 @@ static void apply_fm(ms_state *s, ms_trk *t)
 		wrx(s, ext, (uint8_t)(0x80 + slot + ro), pat[0x15 + i]);
 	}
 	wrx(s, ext, (uint8_t)(0xB0 + slot), (uint8_t)(pat[0] & 0x3F));
-	pan = 0xC0;
-	if (t->pan == 1) pan = 0x40;
-	else if (t->pan == 2) pan = 0x80;
-	else if ((t->pan & 0x80) && t->pan != 0) pan = 0x80;
-	else if (t->pan > 0 && t->pan < 0x80) pan = 0x40;
+	/* 9F raw: 00=centre(C0), 01..7F=right(40), 80..FF=left(80).
+	 * OPN (variant 0) is mono — always both LR enables. */
+	if (s->variant == 0)
+		pan = 0xC0;
+	else {
+		int pp = t->pan & 0xFF;
+		if (pp == 0) pan = 0xC0;
+		else if (pp & 0x80) pan = 0x80;
+		else pan = 0x40;
+	}
 	pan |= (pat[0x23] & 0x37);
 	wrx(s, ext, (uint8_t)(0xB4 + slot), (uint8_t)pan);
 }
@@ -249,6 +296,20 @@ static void fm_on(ms_state *s, ms_trk *t, int note)
 	fn = k_fnum[n] + t->detune;
 	if (fn < 0) fn = 0;
 	if (fn > 0x7FF) fn = 0x7FF;
+	/* Special CH3 (A9): F0/F1/F2 write extension fnum; key-on CH3. */
+	if (s->ch3_special && t->ch_id >= 0xF0 && t->ch_id <= 0xF2) {
+		static const uint8_t k_ext_hi[3] = { 0xAD, 0xAE, 0xAC }; /* op slots */
+		static const uint8_t k_ext_lo[3] = { 0xA9, 0xAA, 0xA8 };
+		int si = t->ch_id - 0xF0;
+		if (t->keyed) fm_off(s, t);
+		wr(s, k_ext_hi[si], (uint8_t)((blk << 3) | ((fn >> 8) & 7)));
+		wr(s, k_ext_lo[si], (uint8_t)fn);
+		wr(s, 0x28, (uint8_t)(0xF0 | 2)); /* key-on FM3 */
+		t->keyed = 1;
+		t->cur_note = note;
+		t->hw = 2;
+		return;
+	}
 	ext = t->hw >= 3;
 	slot = ext ? t->hw - 3 : t->hw;
 	if (t->keyed) fm_off(s, t);
@@ -300,6 +361,7 @@ static void opl_wr(ms_state *s, int port, uint8_t reg, uint8_t val)
 	int p = port ? 1 : 0;
 	s->sh_opl[p][reg] = val;
 	s->sh_opl_set[p][reg] = 1;
+	log_reg(s, "OPL3", p, reg, val);
 	if (!s->opl || s->skip_audio) return;
 	s->opl->write((uint32_t)(port ? 2 : 0), reg);
 	s->opl->write((uint32_t)(port ? 3 : 1), val);
@@ -322,9 +384,10 @@ static void reset_opl(ms_state *s)
 	if (!s->opl) return;
 	s->opl->reset();
 	/* Enable OPL3 mode + wave select */
-	opl_wr(s, 1, 0x05, 0x01);
-	opl_wr(s, 0, 0x01, 0x20);
+	opl_wr(s, 1, 0x05, 0x01); /* OPL3 NEW */
+	opl_wr(s, 0, 0x01, 0x20); /* waveform select enable */
 	opl_wr(s, 0, 0x08, 0x00);
+	opl_wr(s, 0, 0xBD, 0x00); /* no OPL rhythm / percussion mode */
 	for (i = 0; i < 9; i++) {
 		opl_wr(s, 0, (uint8_t)(0xB0 + i), 0);
 		opl_wr(s, 1, (uint8_t)(0xB0 + i), 0);
@@ -343,7 +406,8 @@ static void apply_opl(ms_state *s, ms_trk *t)
 	if (!s->opl || t->kind != CK_OPL || t->hw < 0 || t->hw > 17) return;
 	if (s->opn.size() < (size_t)(t->inst + 1) * MS_OPN_SZ) return;
 	v = s->opn.data() + t->inst * MS_OPN_SZ;
-	/* Prefer type=1 OPL programs; still apply if bank mixes types. */
+	/* Type byte at +0x2F: 0=OPN, 1=OPL. Refuse OPN patches on OPL (garbage/hiss). */
+	if (v[0x2F] != 1) return;
 	port = t->hw >= 9 ? 1 : 0;
 	ch = t->hw % 9;
 	sm = k_opl_slot[ch];
@@ -528,7 +592,8 @@ static void trk_step(ms_state *s, int ti, int dry)
 		if ((size_t)pc + 4 > n) { t->ended = 1; return; }
 		mode = d[pc + 1]; reg = d[pc + 2]; val = d[pc + 3];
 		if (!dry && s->opl) {
-			if (mode == 0x80) opl_wr(s, 0, reg, val);
+			/* Songs use mode 00 (seen as enable/test) and 80/81 for ports. */
+			if (mode == 0x00 || mode == 0x80) opl_wr(s, 0, reg, val);
 			else if (mode == 0x81) opl_wr(s, 1, reg, val);
 		}
 		t->pc = pc + 4; break;
@@ -626,10 +691,28 @@ static void trk_step(ms_state *s, int ti, int dry)
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
 		t->pb = (int16_t)(d[pc + 1] | (d[pc + 2] << 8));
 		t->pc = pc + 3; break;
-	case 0xA5: case 0xA6: case 0xA8: case 0xA9: case 0xAA:
+	case 0xA5: case 0xA6: case 0xA8: case 0xAA:
 	case 0xB0: case 0xB1:
-	case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6:
 		t->pc = pc + 2; break;
+	case 0xA9:
+		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
+		s->ch3_special = d[pc + 1] ? 1 : 0;
+		if (!dry && (s->opna || s->opn_chip)) {
+			/* bit6 of 0x27 enables CH3 special / effect mode */
+			wr(s, 0x27, (uint8_t)(s->ch3_special ? 0x40 : 0x00));
+		}
+		t->pc = pc + 2; break;
+	case 0xD1: case 0xD2: case 0xD3: case 0xD4: case 0xD5: case 0xD6: {
+		int idx = cmd - 0xD1;
+		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
+		if (!dry && !s->mute_rhythm) {
+			/* ADPCM-A pan/level regs 0x18..0x1D */
+			wr(s, (uint8_t)(0x18 + idx), d[pc + 1]);
+			if (s->rhy_have_wav)
+				s->rhy[idx].vol = d[pc + 1] & 0x1F;
+		}
+		t->pc = pc + 2; break;
+	}
 	case 0xA7: case 0xAB: case 0xAC: t->pc = pc + 3; break;
 	case 0xAD:
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
@@ -651,7 +734,16 @@ static void trk_step(ms_state *s, int ti, int dry)
 		t->pc = pc + 3 + (d[pc + 1] | (d[pc + 2] << 8)); break;
 	case 0xD0:
 		if ((size_t)pc + 3 > n) { t->ended = 1; return; }
-		if (!dry && !s->mute_rhythm) wr(s, 0x10, d[pc + 2]);
+		if (!dry && !s->mute_rhythm) {
+			uint8_t mask = d[pc + 2] & 0x3F;
+			if (mask) {
+				/* bit7=1 → key-on selected ADPCM-A channels */
+				wr(s, 0x10, (uint8_t)(0x80 | mask));
+				rhy_hit(s, mask);
+			} else {
+				wr(s, 0x10, 0x00);
+			}
+		}
 		t->wait = d[pc + 1]; t->pc = pc + 3; break;
 	case 0xDD: case 0xDE: case 0xDF:
 	case 0xE2: case 0xE7: case 0xEB: case 0xED: case 0xEE:
@@ -690,6 +782,7 @@ static void trk_step(ms_state *s, int ti, int dry)
 static void tick(ms_state *s, int dry)
 {
 	int i, alive = 0;
+	s->reg_tick++;
 	if (s->song_ended) { s->ended = 1; return; }
 	for (i = 0; i < MS_TRK; i++) {
 		int guard;
@@ -727,7 +820,7 @@ static void reset_trks(ms_state *s)
 		s->trk[i].base = s->trk_off[i];
 		s->trk[i].pc = s->trk_off[i];
 		s->trk[i].vol = 0x64;
-		s->trk[i].pan = 3;
+		s->trk[i].pan = 0;
 		s->trk[i].ch_id = 0xFF;
 	}
 }
@@ -802,16 +895,163 @@ static void commit_shadow(ms_state *s)
 	s->chip_pos = 0;
 }
 
+
+static int load_wav16(const char *path, std::vector<int16_t> *pcm, int *rate_out)
+{
+	FILE *fp;
+	uint8_t hdr[44];
+	uint32_t rate, data_bytes = 0, pos;
+	uint16_t ch, bps;
+	size_t ns;
+	if (!(fp = fopen(path, "rb"))) return 0;
+	if (fread(hdr, 1, 44, fp) < 44 || memcmp(hdr, "RIFF", 4) || memcmp(hdr + 8, "WAVE", 4)) {
+		fclose(fp); return 0;
+	}
+	rate = (uint32_t)hdr[24] | ((uint32_t)hdr[25] << 8) | ((uint32_t)hdr[26] << 16) | ((uint32_t)hdr[27] << 24);
+	ch = (uint16_t)(hdr[22] | (hdr[23] << 8));
+	bps = (uint16_t)(hdr[34] | (hdr[35] << 8));
+	if (ch != 1 || bps != 16) { fclose(fp); return 0; }
+	/* Find data chunk (may not be at 36) */
+	fseek(fp, 12, SEEK_SET);
+	for (;;) {
+		uint8_t id[8];
+		if (fread(id, 1, 8, fp) != 8) { fclose(fp); return 0; }
+		data_bytes = (uint32_t)id[4] | ((uint32_t)id[5] << 8) | ((uint32_t)id[6] << 16) | ((uint32_t)id[7] << 24);
+		if (!memcmp(id, "data", 4)) break;
+		if (fseek(fp, (long)data_bytes, SEEK_CUR) != 0) { fclose(fp); return 0; }
+		(void)pos;
+	}
+	if (data_bytes < 2 || data_bytes > 2u * 1024u * 1024u) { fclose(fp); return 0; }
+	ns = data_bytes / 2;
+	pcm->resize(ns);
+	if (fread(pcm->data(), 2, ns, fp) != ns) { pcm->clear(); fclose(fp); return 0; }
+	fclose(fp);
+	if (rate_out) *rate_out = rate > 0 ? (int)rate : 8000;
+	return 1;
+}
+
+static void load_rhythm(ms_state *s, const pc98_cfg *cfg)
+{
+	static const char *names[6] = {
+		"2608_BD.WAV", "2608_SD.WAV", "2608_TOP.WAV",
+		"2608_HH.WAV", "2608_TOM.WAV", "2608_RIM.WAV"
+	};
+	static const char *names_lo[6] = {
+		"2608_bd.wav", "2608_sd.wav", "2608_top.wav",
+		"2608_hh.wav", "2608_tom.wav", "2608_rim.wav"
+	};
+	char dir[PC98_PATH_MAX], path[PC98_PATH_MAX];
+	FILE *fp;
+	int i, got = 0, rate;
+	dir[0] = 0;
+	if (cfg && cfg->rhythm_path[0])
+		pc98_bounded(dir, sizeof dir, cfg->rhythm_path);
+	else if (cfg && cfg->dll_dir[0])
+		pc98_bounded(dir, sizeof dir, cfg->dll_dir);
+	if (!dir[0]) return;
+	/* Prefer a raw ADPCM-A ROM if present (same as PMD/fmgen). */
+	snprintf(path, sizeof path, "%s%cym2608_adpcm_rom.bin", dir,
+		(dir[strlen(dir)-1] == '/' || dir[strlen(dir)-1] == '\\') ? 0 : '/');
+	if (path[strlen(path)-1] == 0) /* path had trailing slash already handled poorly */
+		snprintf(path, sizeof path, "%sym2608_adpcm_rom.bin", dir);
+	fp = fopen(path, "rb");
+	if (!fp) {
+		snprintf(path, sizeof path, "%s/ym2608_adpcm_rom.bin", dir);
+		fp = fopen(path, "rb");
+	}
+	if (fp) {
+		fseek(fp, 0, SEEK_END);
+		long sz = ftell(fp);
+		fseek(fp, 0, SEEK_SET);
+		if (sz >= 0x2000 && sz <= 0x40000) {
+			s->rhy_rom.resize((size_t)sz);
+			if (fread(s->rhy_rom.data(), 1, (size_t)sz, fp) == (size_t)sz) {
+				s->iface.rom = s->rhy_rom.data();
+				s->iface.rom_n = s->rhy_rom.size();
+			}
+		}
+		fclose(fp);
+		if (s->iface.rom_n) return;
+	}
+	for (i = 0; i < 6; i++) {
+		snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+		if (!load_wav16(path, &s->rhy[i].pcm, &rate)) {
+			snprintf(path, sizeof path, "%s/%s", dir, names_lo[i]);
+			if (!load_wav16(path, &s->rhy[i].pcm, &rate))
+				continue;
+		}
+		s->rhy[i].rate = rate;
+		s->rhy[i].vol = 0x1F;
+		s->rhy[i].on = 0;
+		got++;
+	}
+	/* Also try risingdaw-refs bundled path */
+	if (got < 6) {
+		const char *alt = "/workspace/risingdaw-refs/x68-drums/ym2608";
+		got = 0;
+		for (i = 0; i < 6; i++) {
+			snprintf(path, sizeof path, "%s/%s", alt, names_lo[i]);
+			if (load_wav16(path, &s->rhy[i].pcm, &rate)) {
+				s->rhy[i].rate = rate;
+				s->rhy[i].vol = 0x1F;
+				s->rhy[i].on = 0;
+				got++;
+			}
+		}
+	}
+	s->rhy_have_wav = (got == 6);
+}
+
+static void rhy_hit(ms_state *s, uint8_t mask)
+{
+	int i;
+	if (!s->rhy_have_wav || s->iface.rom_n) return;
+	for (i = 0; i < 6; i++) {
+		if (!(mask & (1 << i))) continue;
+		if (s->rhy[i].pcm.empty()) continue;
+		s->rhy[i].on = 1;
+		s->rhy[i].pos = 0;
+		s->rhy[i].step = (s->rhy[i].rate << 16) / (s->rate > 0 ? s->rate : 44100);
+		s->rhy[i].end = (int)s->rhy[i].pcm.size() << 16;
+	}
+}
+
+static void rhy_mix(ms_state *s, int *l, int *r)
+{
+	int i;
+	if (!s->rhy_have_wav || s->iface.rom_n) return;
+	for (i = 0; i < 6; i++) {
+		int sample, vol;
+		if (!s->rhy[i].on) continue;
+		if (s->rhy[i].pos >= s->rhy[i].end) { s->rhy[i].on = 0; continue; }
+		sample = s->rhy[i].pcm[(size_t)(s->rhy[i].pos >> 16)];
+		vol = s->rhy[i].vol & 0x1F;
+		sample = (sample * (vol + 1)) / 32;
+		*l += sample;
+		*r += sample;
+		s->rhy[i].pos += s->rhy[i].step;
+	}
+}
+
 static void reset_chip(ms_state *s)
 {
 	int i;
+	if (s->opn_chip) {
+		s->opn_chip->reset();
+		wr(s, 0x07, 0x38);
+		for (i = 0; i < 3; i++)
+			wr(s, 0x28, (uint8_t)i);
+		return;
+	}
 	if (!s->opna) return;
 	s->opna->reset();
 	wr(s, 0x29, 0x80);
 	wr(s, 0x07, 0x38);
-	wr(s, 0x11, 0x3F);
-	for (i = 0; i < 6; i++)
+	wr(s, 0x11, 0x3F); /* ADPCM-A total level */
+	for (i = 0; i < 6; i++) {
 		wr(s, 0x28, (uint8_t)(i <= 2 ? i : i - 3 + 4));
+		wr(s, (uint8_t)(0x18 + i), 0xDF); /* ADPCM-A pan L+R + level */
+	}
 }
 
 static void detect_variant(ms_state *s)
@@ -956,20 +1196,30 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		s->chip_clock = MS_OPL_CLOCK;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_opl(s);
-	} else {
+	} else if (s->variant == 0) {
 		uint32_t sr;
-		/* _N = PC-9801-26 YM2203 @ 3.9936 MHz; _B2 = 86 board YM2608 @ 7.9872 MHz.
-		 * We still use ym2608 for both (3 FM + SSG) but clock the chip correctly. */
-		s->chip_clock = (s->variant == 0) ? MS_CLOCK_OPN : MS_CLOCK_OPNA;
-		s->opna = new ymfm::ym2608(s->iface);
-		sr = s->opna->sample_rate(s->chip_clock);
-		if (sr == 0) sr = (s->variant == 0) ? 27733 : 55467;
+		/* True YM2203 — mono FM+SSG. Avoids OPNA stereo pan regs on a mono chip. */
+		s->chip_clock = MS_CLOCK_OPN;
+		s->mono = 1;
+		s->opn_chip = new ymfm::ym2203(s->iface);
+		sr = s->opn_chip->sample_rate(s->chip_clock);
+		if (sr == 0) sr = 27733;
 		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_chip(s);
+	} else {
+		uint32_t sr;
+		s->chip_clock = MS_CLOCK_OPNA;
+		s->mono = 0;
+		s->opna = new ymfm::ym2608(s->iface);
+		sr = s->opna->sample_rate(s->chip_clock);
+		if (sr == 0) sr = 55467;
+		s->chip_step = ((int64_t)sr << 16) / s->rate;
+		reset_chip(s);
+		load_rhythm(s, cfg);
 	}
 
 	reset_trks(s);
-	if (s->opna) reset_chip(s);
+	if (s->opna || s->opn_chip) reset_chip(s);
 	if (s->opl) reset_opl(s);
 	if (s->sf) {
 		int c;
@@ -983,6 +1233,15 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		}
 	}
 	s->play_limit = (uint32_t)(((int64_t)s->one_loop_ms * s->loops_want * s->rate) / 1000);
+
+	{
+		const char *rl = getenv("MSDRV_REGLOG");
+		if (rl && rl[0]) {
+			s->reg_log = fopen(rl, "w");
+			if (s->reg_log)
+				fprintf(s->reg_log, "# tick chip port reg val\n");
+		}
+	}
 	s->play_samples = 0;
 	s->tick_acc = 0;
 	s->chip_pos = 0;
@@ -1027,6 +1286,7 @@ void *msdrv_open_mem(const char *filename, const uint8_t *data, size_t len,
 	ms_state *s = new ms_state();
 	if (setup(s, filename, data, len, cfg) != 0) {
 		delete s->opna;
+		delete s->opn_chip;
 		delete s->opl;
 		delete s;
 		return NULL;
@@ -1038,6 +1298,7 @@ void msdrv_close_h(void *h)
 {
 	ms_state *s = (ms_state *)h;
 	if (!s) return;
+	if (s->reg_log) { fclose(s->reg_log); s->reg_log = NULL; }
 	/* Shared TSF cache — must silence voices so the next open starts clean. */
 	if (s->sf) {
 		sf_silence(s->sf);
@@ -1045,6 +1306,7 @@ void msdrv_close_h(void *h)
 		s->sf = NULL; s->sf_owned = 0;
 	}
 	delete s->opna;
+	delete s->opn_chip;
 	delete s->opl;
 	delete s;
 }
@@ -1146,14 +1408,24 @@ int msdrv_process_h(void *h, float *buf, int count)
 			int chunk = (int)(((int64_t)s->rate - s->tick_acc + tps - 1) / tps);
 			if (chunk < 1) chunk = 1;
 			if (chunk > room) chunk = room;
-			if (s->opna || s->opl) {
+			if (s->opna || s->opn_chip || s->opl) {
 				for (i = 0; i < chunk; i++) {
 					float L, R, frac, mix_l, mix_r;
 					s->chip_pos += s->chip_step;
 					while (s->chip_pos >= 0x10000) {
 						s->prev_l = s->last_l;
 						s->prev_r = s->last_r;
-						if (s->opna) {
+						if (s->opn_chip) {
+							int fm, ssg, m;
+							s->opn_chip->generate(&s->opn_out);
+							fm = s->opn_out.data[0];
+							ssg = s->opn_out.data[1];
+							if (s->mute_fm) fm = 0;
+							if (s->mute_ssg) ssg = 0;
+							ssg = ssg / 8;
+							m = fm + ssg;
+							s->last_l = s->last_r = m; /* YM2203 mono → both speakers */
+						} else if (s->opna) {
 							int fm_l, fm_r, ssg;
 							s->opna->generate(&s->out);
 							fm_l = s->out.data[0];
@@ -1161,10 +1433,10 @@ int msdrv_process_h(void *h, float *buf, int count)
 							ssg = s->out.data[2];
 							if (s->mute_fm) { fm_l = 0; fm_r = 0; }
 							if (s->mute_ssg) ssg = 0;
-							/* S98 PC-9801: SSG ≈ -18 dB vs FM; PMD also halves mix. */
 							ssg = ssg / 8;
 							s->last_l = fm_l + ssg;
 							s->last_r = fm_r + ssg;
+							rhy_mix(s, &s->last_l, &s->last_r);
 						} else {
 							s->opl->generate(&s->opl_out);
 							s->last_l = s->opl_out.data[0] + s->opl_out.data[2];
