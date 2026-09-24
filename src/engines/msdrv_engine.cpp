@@ -17,6 +17,7 @@
 
 #include "ymfm.h"
 #include "ymfm_opn.h"
+#include "ymfm_opl.h"
 #include "tsf.h"
 
 #define MS_TRK       36
@@ -27,6 +28,8 @@
 #define MS_OPN_N     256
 #define MS_OPN_SZ    48
 #define MS_SSG_SZ    16
+#define MS_OPL_CLOCK 14318181u
+static const uint8_t k_opl_slot[9] = { 0,1,2,8,9,10,16,17,18 };
 
 enum { CK_NONE=0, CK_FM, CK_SSG, CK_MIDI, CK_OPL };
 
@@ -64,12 +67,18 @@ struct ms_state {
 	ms_iface iface;
 	ymfm::ym2608 *opna;
 	ymfm::ym2608::output_data out;
+	ymfm::ymf262 *opl;
+	ymfm::ymf262::output_data opl_out;
 	tsf *sf;
+	int sf_owned;
 	int rate, loops_want, one_loop_ms, ended, song_ended;
 	int tempo, timebase, tempo_mod;
 	int mute_fm, mute_ssg, mute_rhythm;
 	int64_t chip_pos, chip_step, tick_acc;
 	int last_l, last_r;
+	/* Fixed-quantum TSF FIFO so host chunk size cannot change float order. */
+	float tsf_fifo[64 * 2];
+	int tsf_fifo_pos, tsf_fifo_len;
 	uint32_t play_samples, play_limit;
 	uint8_t ssg_mix;
 	int variant; /* 0 OPN, 1 OPNA, 2 MIDI, 3 OPL */
@@ -78,10 +87,11 @@ struct ms_state {
 	char title[256];
 
 	ms_state()
-		: opna(NULL), sf(NULL), rate(PC98_DEFAULT_RATE), loops_want(1),
+		: opna(NULL), opl(NULL), sf(NULL), sf_owned(0), rate(PC98_DEFAULT_RATE), loops_want(1),
 		  one_loop_ms(0), ended(0), song_ended(0), tempo(120), timebase(48),
 		  tempo_mod(0x40), mute_fm(0), mute_ssg(0), mute_rhythm(0),
 		  chip_pos(0), chip_step(0), tick_acc(0), last_l(0), last_r(0),
+		  tsf_fifo_pos(0), tsf_fifo_len(0),
 		  play_samples(0), play_limit(0), ssg_mix(0x38), variant(0), loop_hit(0), saw_inf_loop(0)
 	{
 		memset(trk_off, 0, sizeof trk_off);
@@ -263,6 +273,128 @@ static void ssg_on(ms_state *s, ms_trk *t, int note)
 	t->cur_note = note;
 }
 
+
+static void opl_wr(ms_state *s, int port, uint8_t reg, uint8_t val)
+{
+	if (!s->opl) return;
+	s->opl->write((uint32_t)(port ? 2 : 0), reg);
+	s->opl->write((uint32_t)(port ? 3 : 1), val);
+}
+
+
+static void sf_silence(tsf *sf)
+{
+	int c;
+	if (!sf) return;
+	for (c = 0; c < 16; c++)
+		tsf_channel_sounds_off_all(sf, c);
+	tsf_note_off_all(sf);
+	tsf_reset(sf);
+}
+
+static void reset_opl(ms_state *s)
+{
+	int i;
+	if (!s->opl) return;
+	s->opl->reset();
+	/* Enable OPL3 mode + wave select */
+	opl_wr(s, 1, 0x05, 0x01);
+	opl_wr(s, 0, 0x01, 0x20);
+	opl_wr(s, 0, 0x08, 0x00);
+	for (i = 0; i < 9; i++) {
+		opl_wr(s, 0, (uint8_t)(0xB0 + i), 0);
+		opl_wr(s, 1, (uint8_t)(0xB0 + i), 0);
+		opl_wr(s, 0, (uint8_t)(0xA0 + i), 0);
+		opl_wr(s, 1, (uint8_t)(0xA0 + i), 0);
+		opl_wr(s, 0, (uint8_t)(0xC0 + i), 0x30);
+		opl_wr(s, 1, (uint8_t)(0xC0 + i), 0x30);
+	}
+}
+
+static void apply_opl(ms_state *s, ms_trk *t)
+{
+	const uint8_t *v;
+	int port, ch, sm, sc, vol_tl, i;
+	uint8_t fb_cnt, pan;
+	if (!s->opl || t->kind != CK_OPL || t->hw < 0 || t->hw > 17) return;
+	if (s->opn.size() < (size_t)(t->inst + 1) * MS_OPN_SZ) return;
+	v = s->opn.data() + t->inst * MS_OPN_SZ;
+	/* Prefer type=1 OPL programs; still apply if bank mixes types. */
+	port = t->hw >= 9 ? 1 : 0;
+	ch = t->hw % 9;
+	sm = k_opl_slot[ch];
+	sc = sm + 3;
+	fb_cnt = (uint8_t)(((v[0] & 0x38) >> 0) | (v[0] & 0x01));
+	/* LR both on for stereo OPL3 */
+	pan = 0x30;
+	opl_wr(s, port, (uint8_t)(0xC0 + ch), (uint8_t)(pan | (fb_cnt & 0x0F)));
+	for (i = 0; i < 2; i++) {
+		int slot = i ? sc : sm;
+		int o = i; /* op1 / op2 in file */
+		uint8_t mult = v[1 + o] & 0x0F;
+		uint8_t tl = v[5 + o] & 0x3F;
+		uint8_t ks_ar = v[9 + o];
+		uint8_t am_dr = v[0x0D + o];
+		uint8_t vib_ws = v[0x11 + o];
+		uint8_t sl_rr = v[0x15 + o];
+		uint8_t r20 = (uint8_t)(((am_dr & 0x80)) | ((vib_ws & 0x40) ? 0x40 : 0) |
+			((vib_ws & 0x20) ? 0x20 : 0) | ((vib_ws & 0x10) ? 0x10 : 0) | mult);
+		/* Scale carrier TL by track volume (0..127 → add up to 0x3F). */
+		vol_tl = tl;
+		if (i == 1) {
+			int add = (127 - (t->vol & 127)) * 63 / 127;
+			vol_tl = tl + add;
+			if (vol_tl > 0x3F) vol_tl = 0x3F;
+		}
+		uint8_t r40 = (uint8_t)(((ks_ar & 0xC0)) | (vol_tl & 0x3F));
+		uint8_t r60 = (uint8_t)(((ks_ar & 0x0F) << 4) | (am_dr & 0x0F));
+		uint8_t r80 = sl_rr;
+		uint8_t rE0 = (uint8_t)(vib_ws & 0x07);
+		opl_wr(s, port, (uint8_t)(0x20 + slot), r20);
+		opl_wr(s, port, (uint8_t)(0x40 + slot), r40);
+		opl_wr(s, port, (uint8_t)(0x60 + slot), r60);
+		opl_wr(s, port, (uint8_t)(0x80 + slot), r80);
+		opl_wr(s, port, (uint8_t)(0xE0 + slot), rE0);
+	}
+}
+
+static void opl_off(ms_state *s, ms_trk *t)
+{
+	int port, ch;
+	if (!s->opl || t->kind != CK_OPL || !t->keyed) return;
+	port = t->hw >= 9 ? 1 : 0;
+	ch = t->hw % 9;
+	/* Drop KEYON; zeroing A0/B0 is fine for our purposes. */
+	opl_wr(s, port, (uint8_t)(0xB0 + ch), 0);
+	t->keyed = 0;
+}
+
+static void opl_on(ms_state *s, ms_trk *t, int note)
+{
+	int port, ch, fnote, block, fnum;
+	double freq;
+	if (!s->opl || t->kind != CK_OPL || t->hw < 0 || t->hw > 17) return;
+	apply_opl(s, t);
+	port = t->hw >= 9 ? 1 : 0;
+	ch = t->hw % 9;
+	fnote = note + (t->pb / 256);
+	if (fnote < 0) fnote = 0;
+	if (fnote > 95) fnote = 95;
+	/* OPL3: fnum = freq * 2^(20 - block) / (clock/288) */
+	block = fnote / 12;
+	if (block < 0) block = 0;
+	if (block > 7) block = 7;
+	freq = 440.0 * pow(2.0, (fnote - 69) / 12.0);
+	fnum = (int)(freq * (1 << (20 - block)) / (MS_OPL_CLOCK / 288.0) + 0.5);
+	if (fnum < 0) fnum = 0;
+	if (fnum > 0x3FF) fnum = 0x3FF;
+	opl_wr(s, port, (uint8_t)(0xA0 + ch), (uint8_t)(fnum & 0xFF));
+	opl_wr(s, port, (uint8_t)(0xB0 + ch),
+		(uint8_t)(0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3)));
+	t->keyed = 1;
+	t->cur_note = note;
+}
+
 static void midi_off(ms_state *s, ms_trk *t)
 {
 	if (!s->sf || t->kind != CK_MIDI || !t->keyed) return;
@@ -285,6 +417,7 @@ static void note_off(ms_state *s, ms_trk *t)
 	if (t->kind == CK_FM) fm_off(s, t);
 	else if (t->kind == CK_SSG) ssg_off(s, t);
 	else if (t->kind == CK_MIDI) midi_off(s, t);
+	else if (t->kind == CK_OPL) opl_off(s, t);
 	t->gate_left = 0;
 }
 static void note_on(ms_state *s, ms_trk *t, int note, int gate, int vel)
@@ -300,6 +433,8 @@ static void note_on(ms_state *s, ms_trk *t, int note, int gate, int vel)
 		ssg_on(s, t, note);
 	} else if (t->kind == CK_MIDI) {
 		midi_on(s, t, note, vel >= 0 ? vel : t->vol);
+	} else if (t->kind == CK_OPL) {
+		opl_on(s, t, note);
 	}
 	t->gate_left = gate;
 }
@@ -356,11 +491,21 @@ static void trk_step(ms_state *s, int ti, int dry)
 		s->timebase = d[pc + 1] | (d[pc + 2] << 8);
 		if (s->timebase <= 0) s->timebase = 48;
 		t->pc = pc + 3; break;
-	case 0x81: t->pc = pc + 4; break;
+	case 0x81: {
+		uint8_t mode, reg, val;
+		if ((size_t)pc + 4 > n) { t->ended = 1; return; }
+		mode = d[pc + 1]; reg = d[pc + 2]; val = d[pc + 3];
+		if (!dry && s->opl) {
+			if (mode == 0x80) opl_wr(s, 0, reg, val);
+			else if (mode == 0x81) opl_wr(s, 1, reg, val);
+		}
+		t->pc = pc + 4; break;
+	}
 	case 0x82:
 		if ((size_t)pc + 2 > n) { t->ended = 1; return; }
 		t->inst = d[pc + 1];
 		if (!dry && t->kind == CK_FM) apply_fm(s, t);
+		if (!dry && t->kind == CK_OPL) apply_opl(s, t);
 		if (!dry && t->kind == CK_MIDI && s->sf)
 			tsf_channel_set_presetnumber(s->sf, t->hw, t->inst & 127, t->hw == 9);
 		t->pc = pc + 2; break;
@@ -690,11 +835,25 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 
 	if (s->variant == 2) {
 		char sf2[PC98_PATH_MAX];
-		if (fmd_find_sf2(cfg, filename, 0, sf2, sizeof sf2))
-			s->sf = (tsf *)fmd_font_get(sf2);
+		if (fmd_find_sf2(cfg, filename, 0, sf2, sizeof sf2)) {
+			/* Own a dedicated instance — shared FMD cache retains filter/voice
+			 * state across close/open and breaks chunk-identity tests. */
+			s->sf = tsf_load_filename(sf2);
+			s->sf_owned = s->sf ? 1 : 0;
+			if (!s->sf)
+				s->sf = (tsf *)fmd_font_get(sf2);
+		}
+		/* Match FMD: modest headroom so dense GS scores don't clip/lag the mixer. */
 		if (s->sf)
-			tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, 0);
-	} else if (s->variant != 3) {
+			tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
+	} else if (s->variant == 3) {
+		uint32_t sr;
+		s->opl = new ymfm::ymf262(s->iface);
+		sr = s->opl->sample_rate(MS_OPL_CLOCK);
+		if (sr == 0) sr = 49716;
+		s->chip_step = ((int64_t)sr << 16) / s->rate;
+		reset_opl(s);
+	} else {
 		uint32_t sr;
 		s->opna = new ymfm::ym2608(s->iface);
 		sr = s->opna->sample_rate(MS_CLOCK);
@@ -705,13 +864,15 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 
 	reset_trks(s);
 	if (s->opna) reset_chip(s);
+	if (s->opl) reset_opl(s);
 	if (s->sf) {
 		int c;
-		tsf_reset(s->sf);
-		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, 0);
+		sf_silence(s->sf);
+		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
 		for (c = 0; c < 16; c++) {
 			tsf_channel_set_presetnumber(s->sf, c, 0, c == 9);
 			tsf_channel_midi_control(s->sf, c, 7, 100);
+			tsf_channel_midi_control(s->sf, c, 11, 127);
 			tsf_channel_midi_control(s->sf, c, 10, 64);
 		}
 	}
@@ -719,6 +880,8 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 	s->play_samples = 0;
 	s->tick_acc = 0;
 	s->chip_pos = 0;
+	s->tsf_fifo_pos = 0;
+	s->tsf_fifo_len = 0;
 	return 0;
 }
 
@@ -730,7 +893,8 @@ int msdrv_analyze_mem(const char *filename, const uint8_t *data, size_t len,
 	if (!out) return -1;
 	memset(out, 0, sizeof *out);
 	if (setup(&tmp, filename, data, len, cfg) != 0) {
-		delete tmp.opna;
+		if (tmp.sf) { sf_silence(tmp.sf); if (tmp.sf_owned) tsf_close(tmp.sf); }
+		delete tmp.opna; delete tmp.opl;
 		return -1;
 	}
 	out->kind = PC98_KIND_MSDRV;
@@ -743,10 +907,11 @@ int msdrv_analyze_mem(const char *filename, const uint8_t *data, size_t len,
 	else if (tmp.variant == 2) {
 		ft = "MsDRV GS";
 		eng = tmp.sf ? "TinySoundFont MsDRV GS" : "MsDRV GS (no SF2)";
-	} else { ft = "MsDRV OPL3"; eng = "MsDRV OPL3 (unsupported)"; }
+	} else { ft = "MsDRV OPL3"; eng = "ymfm MsDRV OPL3"; }
 	pc98_bounded(out->filetype, sizeof out->filetype, ft);
 	pc98_bounded(out->engine, sizeof out->engine, eng);
-	delete tmp.opna;
+	if (tmp.sf) { sf_silence(tmp.sf); if (tmp.sf_owned) tsf_close(tmp.sf); }
+	delete tmp.opna; delete tmp.opl;
 	return 0;
 }
 
@@ -756,6 +921,7 @@ void *msdrv_open_mem(const char *filename, const uint8_t *data, size_t len,
 	ms_state *s = new ms_state();
 	if (setup(s, filename, data, len, cfg) != 0) {
 		delete s->opna;
+		delete s->opl;
 		delete s;
 		return NULL;
 	}
@@ -766,61 +932,138 @@ void msdrv_close_h(void *h)
 {
 	ms_state *s = (ms_state *)h;
 	if (!s) return;
+	/* Shared TSF cache — must silence voices so the next open starts clean. */
+	if (s->sf) {
+		sf_silence(s->sf);
+		if (s->sf_owned) tsf_close(s->sf);
+		s->sf = NULL; s->sf_owned = 0;
+	}
 	delete s->opna;
+	delete s->opl;
 	delete s;
 }
 
 int msdrv_process_h(void *h, float *buf, int count)
 {
 	ms_state *s = (ms_state *)h;
-	int i, tps;
+	int done = 0;
 	if (!s || !buf || count <= 0) return 0;
-	tps = ticks_per_sec(s);
-	if (tps < 1) tps = 1;
-	for (i = 0; i < count; i++) {
-		float L = 0, R = 0;
-		if (s->play_limit && s->play_samples >= s->play_limit) {
-			buf[i * 2] = buf[i * 2 + 1] = 0;
-			continue;
-		}
-		/* Advance sequencer in host-sample units (same pattern as BGMDRV/OPNDRV):
-		 * accumulate tps per sample, fire a tick each time rate is reached.
-		 * Avoids (rate<<16)/tps truncation jitter that varies with buffer size. */
-		s->tick_acc += tps;
+	memset(buf, 0, (size_t)count * 2 * sizeof(float));
+	while (done < count) {
+		int tps, i, room;
+		if (s->play_limit && s->play_samples >= s->play_limit)
+			break;
+		tps = ticks_per_sec(s);
+		if (tps < 1) tps = 1;
+
+		/* Due ticks — flush any TSF lookahead first (should already be empty). */
 		while (s->tick_acc >= s->rate) {
+			s->tsf_fifo_pos = 0;
+			s->tsf_fifo_len = 0;
 			tick(s, 0);
 			s->tick_acc -= s->rate;
 			tps = ticks_per_sec(s);
 			if (tps < 1) tps = 1;
 		}
-		if (s->opna) {
-			s->chip_pos += s->chip_step;
-			while (s->chip_pos >= 0x10000) {
-				int fm_l, fm_r, ssg;
-				s->opna->generate(&s->out);
-				fm_l = s->out.data[0];
-				fm_r = s->out.data[1];
-				ssg = s->out.data[2];
-				if (s->mute_fm) { fm_l = 0; fm_r = 0; }
-				if (s->mute_ssg) ssg = 0;
-				s->last_l = fm_l + ssg;
-				s->last_r = fm_r + ssg;
-				s->chip_pos -= 0x10000;
-			}
-			L = s->last_l / 32768.f;
-			R = s->last_r / 32768.f;
+
+		room = count - done;
+		if (s->play_limit) {
+			uint32_t left = s->play_limit - s->play_samples;
+			if ((uint32_t)room > left) room = (int)left;
 		}
+		if (room < 1) break;
+
+		/* Emit one host sample (or a short burst for chip paths). For TSF we
+		 * refill a fixed 64-sample FIFO that never extends past the next tick,
+		 * so any host buffer size yields the same float stream. */
 		if (s->sf) {
-			float m[2] = {0, 0};
-			tsf_render_float(s->sf, m, 1, 0);
-			L += m[0]; R += m[1];
+			int emitted = 0;
+			while (emitted < room) {
+				int until_tick, avail, take, gen;
+				if (s->tick_acc >= s->rate)
+					break; /* let outer loop fire the tick */
+				until_tick = (int)(((int64_t)s->rate - s->tick_acc + tps - 1) / tps);
+				if (until_tick < 1) until_tick = 1;
+				avail = s->tsf_fifo_len - s->tsf_fifo_pos;
+				if (avail <= 0) {
+					gen = 64;
+					if (gen > until_tick) gen = until_tick;
+					memset(s->tsf_fifo, 0, sizeof s->tsf_fifo);
+					tsf_render_float(s->sf, s->tsf_fifo, gen, 0);
+					s->tsf_fifo_pos = 0;
+					s->tsf_fifo_len = gen;
+					avail = gen;
+				}
+				take = avail;
+				if (take > room - emitted) take = room - emitted;
+				if (take > until_tick) take = until_tick;
+				for (i = 0; i < take; i++) {
+					buf[(done + emitted + i) * 2] += s->tsf_fifo[(s->tsf_fifo_pos + i) * 2];
+					buf[(done + emitted + i) * 2 + 1] += s->tsf_fifo[(s->tsf_fifo_pos + i) * 2 + 1];
+				}
+				s->tsf_fifo_pos += take;
+				for (i = 0; i < take; i++) {
+					s->tick_acc += tps;
+					s->play_samples++;
+				}
+				emitted += take;
+			}
+			/* Clamp */
+			for (i = 0; i < emitted; i++) {
+				float L = buf[(done + i) * 2], R = buf[(done + i) * 2 + 1];
+				if (L > 1) L = 1; if (L < -1) L = -1;
+				if (R > 1) R = 1; if (R < -1) R = -1;
+				buf[(done + i) * 2] = L; buf[(done + i) * 2 + 1] = R;
+			}
+			done += emitted;
+			continue;
 		}
-		if (L > 1) L = 1;
-		if (L < -1) L = -1;
-		if (R > 1) R = 1;
-		if (R < -1) R = -1;
-		buf[i * 2] = L; buf[i * 2 + 1] = R;
-		s->play_samples++;
+
+		/* FM / OPL path: render up to next tick in one go (deterministic). */
+		{
+			int chunk = (int)(((int64_t)s->rate - s->tick_acc + tps - 1) / tps);
+			if (chunk < 1) chunk = 1;
+			if (chunk > room) chunk = room;
+			if (s->opna || s->opl) {
+				for (i = 0; i < chunk; i++) {
+					float L, R;
+					s->chip_pos += s->chip_step;
+					while (s->chip_pos >= 0x10000) {
+						if (s->opna) {
+							int fm_l, fm_r, ssg;
+							s->opna->generate(&s->out);
+							fm_l = s->out.data[0];
+							fm_r = s->out.data[1];
+							ssg = s->out.data[2];
+							if (s->mute_fm) { fm_l = 0; fm_r = 0; }
+							if (s->mute_ssg) ssg = 0;
+							s->last_l = fm_l + ssg;
+							s->last_r = fm_r + ssg;
+						} else {
+							s->opl->generate(&s->opl_out);
+							s->last_l = s->opl_out.data[0] + s->opl_out.data[2];
+							s->last_r = s->opl_out.data[1] + s->opl_out.data[3];
+						}
+						s->chip_pos -= 0x10000;
+					}
+					L = s->last_l / 32768.f;
+					R = s->last_r / 32768.f;
+					if (L > 1) L = 1; if (L < -1) L = -1;
+					if (R > 1) R = 1; if (R < -1) R = -1;
+					buf[(done + i) * 2] = L;
+					buf[(done + i) * 2 + 1] = R;
+					s->tick_acc += tps;
+					s->play_samples++;
+				}
+			} else {
+				/* silence */
+				for (i = 0; i < chunk; i++) {
+					s->tick_acc += tps;
+					s->play_samples++;
+				}
+			}
+			done += chunk;
+		}
 	}
 	return count;
 }
@@ -828,23 +1071,32 @@ int msdrv_process_h(void *h, float *buf, int count)
 int msdrv_seek_ms_h(void *h, int ms)
 {
 	ms_state *s = (ms_state *)h;
-	int tps, ticks, i;
+	uint32_t target;
+	float discard[512 * 2];
 	if (!s) return -1;
 	if (ms < 0) ms = 0;
 	reset_trks(s);
 	if (s->opna) reset_chip(s);
+	if (s->opl) reset_opl(s);
 	if (s->sf) {
 		tsf_note_off_all(s->sf);
 		tsf_reset(s->sf);
-		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, 0);
+		tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, -8.0f);
 	}
-	tps = ticks_per_sec(s);
-	ticks = (int)((int64_t)ms * tps / 1000);
-	for (i = 0; i < ticks && !s->ended; i++) tick(s, 0);
-	s->play_samples = (uint32_t)(((int64_t)ms * s->rate) / 1000);
+	s->play_samples = 0;
 	s->tick_acc = 0;
 	s->chip_pos = 0;
-	return 0;
+	s->tsf_fifo_pos = 0;
+	s->tsf_fifo_len = 0;
+	target = (uint32_t)(((int64_t)ms * s->rate) / 1000);
+	/* Soft-render (discard) so chip envelopes and TSF voices match a linear play
+	 * to the same time — tick-only seek left envelopes at attack = audible seek glitch. */
+	while (s->play_samples < target && !s->ended) {
+		int n = (int)(target - s->play_samples);
+		if (n > 512) n = 512;
+		msdrv_process_h(s, discard, n);
+	}
+	return (int)(((int64_t)s->play_samples * 1000) / s->rate);
 }
 
 int msdrv_one_loop_ms_h(void *h)
