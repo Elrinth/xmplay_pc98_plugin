@@ -252,7 +252,7 @@ static inline int pc98_looks_ntl(const uint8_t *d, size_t n)
 	table = 4 + cnt * 3;
 	if (n < table) return 1;
 	for (i = 0; i < cnt; ++i) {
-		unsigned typ = d[4 + i * 3 + 2];
+		unsigned typ = d[4 + i * 3 + 2] & 0x7Fu; /* Eikan: bit7 = conductor */
 		if (typ >= 0x10 && typ <= 0x22)
 			fm++;
 	}
