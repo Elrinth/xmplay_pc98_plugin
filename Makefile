@@ -4,7 +4,7 @@
 # /usr/bin/make          # host tests + 32-bit DLL
 # /usr/bin/make dll      # dist/xmp-pc98.dll
 # /usr/bin/make test     # host render tests
-# /usr/bin/make pack     # xmp-pc98-1.0.22.zip
+# /usr/bin/make pack     # xmp-pc98-1.0.23.zip
 # /usr/bin/make scan     # dist/pc98-scan.exe (or host binary)
 # /usr/bin/make fetch-xml
 
@@ -200,13 +200,13 @@ pack: dll
 	cp -f $(DIST)/xmp-pc98.dll $(ROOT)/README.md $(ROOT)/LICENSE $(DIST)/pack/
 	-cp -f $(DIST)/pc98-scan.exe $(DIST)/pack/
 	-cp -f $(FMGEN)/readme.txt $(DIST)/pack/fmgen-readme.txt
-	rm -f $(DIST)/xmp-pc98-1.0.22.zip
+	rm -f $(DIST)/xmp-pc98-1.0.23.zip
 	powershell.exe -NoProfile -Command \
-		"Compress-Archive -Path '$(DIST)/pack/*' -DestinationPath '$(DIST)/xmp-pc98-1.0.22.zip' -Force"
+		"Compress-Archive -Path '$(DIST)/pack/*' -DestinationPath '$(DIST)/xmp-pc98-1.0.23.zip' -Force"
 	rm -rf $(DIST)/pack
-	ls -l $(DIST)/xmp-pc98.dll $(DIST)/xmp-pc98-1.0.22.zip
+	ls -l $(DIST)/xmp-pc98.dll $(DIST)/xmp-pc98-1.0.23.zip
 
 clean:
 	rm -rf $(DIST)/xmp-pc98.dll $(DIST)/pc98-scan $(DIST)/pc98-scan.exe \
 		$(DIST)/test_s98_render $(DIST)/test_pmd_render $(DIST)/test_pc98_render \
-		$(DIST)/obj $(DIST)/obj-i686 $(DIST)/pack $(DIST)/xmp-pc98-1.0.22.zip
+		$(DIST)/obj $(DIST)/obj-i686 $(DIST)/pack $(DIST)/xmp-pc98-1.0.23.zip

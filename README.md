@@ -1,4 +1,4 @@
-# xmp-pc98 1.0.22
+# xmp-pc98 1.0.23
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
@@ -7,18 +7,17 @@ This is **not** a wrap of S98Amp / `in_s98.dll`, `in_fmpmd.dll`, or ZXTune.
 Same rule as xmp-gamemusic (“does not wrap `in_nez.dll`”).
 
 Classic XMPlay is **32-bit only**. This DLL is PE32 i386.
-VERSIONINFO FILEVERSION is **1.0.22.0**; `PLUGIN_XMPVER` is **1002200**.
+VERSIONINFO FILEVERSION is **1.0.23.0**; `PLUGIN_XMPVER` is **1002300**.
 
 
-## 1.0.22
+## 1.0.23
 
-MsDRV4 polish after 1.0.20 feedback (`EC_10_*`):
-
-- **OPNA `_B2` crackle:** mix scaled (~½ like PMD), SSG ≈ −18 dB, soft clip, linear resample from ymfm rate (was nearest/ZOH).
-- **OPN `_N` pitch:** chip clock 3.9936 MHz; F-num/block octave base corrected (`note/12−1` vs OPNA `note/12−2`).
-- **OPL3 `_SB`:** MST type=1 bit packing (TL/AR/DR >>1, vib/egt/ksr map), F-num block `note/12−1`, volume TL scaling.
-- **Seek:** register-shadow fast-forward + ~50 ms settle (no full soft-render); TSF re-triggers held notes. Seek to ~48 s ≈ 2 ms.
-- **`_88`:** confirmed Roland SC-88 (GS) path — same engine as `_GS`.
+- **Ground-truth MsDRV harness** (`tools/msdrv_unicorn_harness.py`): runs real
+  `MSDRV4L.EXE` under Unicorn and logs OPN/OPNA/OPL3 writes. Refs in
+  `tools/msdrv_ref_logs/EC_10_{N,B2,SB}_msdrv4l.reg`.
+- **OPN/OPNA operator order**: patch bytes → HW ops `{0,4,8,12}` matching
+  MSDRV4L (was docs-order `{0,8,4,12}`, which swapped OP2/OP3).
+- SB/OPL3 still diverges on 4-op programming; tracked against the new refs.
 
 ## Install
 
@@ -122,7 +121,7 @@ make          # tests + dll
 make test
 make dll
 make scan
-make pack     # dist/xmp-pc98-1.0.22.zip
+make pack     # dist/xmp-pc98-1.0.23.zip
 make fetch-xml
 ```
 

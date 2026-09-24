@@ -35,7 +35,7 @@ static const uint8_t k_opl_slot[9] = { 0,1,2,8,9,10,16,17,18 };
 
 enum { CK_NONE=0, CK_FM, CK_SSG, CK_MIDI, CK_OPL };
 
-static const int k_op[4] = { 0, 8, 4, 12 }; /* file OP1,OP3,OP2,OP4 */
+static const int k_op[4] = { 0, 4, 8, 12 }; /* MSDRV4L writes file order to HW op1..op4 ( empirically from Unicorn capture) */
 static const uint8_t k_car[8] = {
 	0x08, 0x08, 0x08, 0x08, 0x0A, 0x0E, 0x0E, 0x0F
 };
