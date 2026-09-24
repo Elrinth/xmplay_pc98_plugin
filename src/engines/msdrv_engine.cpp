@@ -672,7 +672,7 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		uint32_t o = rd32(data + i * 4);
 		s->trk_off[i] = (o && o < len) ? (int)o : 0;
 	}
-	s->rate = PC98_DEFAULT_RATE;
+	s->rate = cfg && cfg->rate > 0 ? cfg->rate : PC98_DEFAULT_RATE;
 	s->loops_want = (cfg && cfg->loop_count > 0) ? cfg->loop_count : 1;
 	s->mute_fm = cfg ? cfg->mute_fm : 0;
 	s->mute_ssg = cfg ? cfg->mute_ssg : 0;
@@ -695,8 +695,11 @@ static int setup(ms_state *s, const char *filename, const uint8_t *data,
 		if (s->sf)
 			tsf_set_output(s->sf, TSF_STEREO_INTERLEAVED, s->rate, 0);
 	} else if (s->variant != 3) {
+		uint32_t sr;
 		s->opna = new ymfm::ym2608(s->iface);
-		s->chip_step = ((int64_t)MS_CLOCK << 16) / s->rate;
+		sr = s->opna->sample_rate(MS_CLOCK);
+		if (sr == 0) sr = 55467;
+		s->chip_step = ((int64_t)sr << 16) / s->rate;
 		reset_chip(s);
 	}
 
@@ -771,20 +774,24 @@ int msdrv_process_h(void *h, float *buf, int count)
 {
 	ms_state *s = (ms_state *)h;
 	int i, tps;
-	int64_t need;
 	if (!s || !buf || count <= 0) return 0;
 	tps = ticks_per_sec(s);
-	need = ((int64_t)s->rate << 16) / tps;
+	if (tps < 1) tps = 1;
 	for (i = 0; i < count; i++) {
 		float L = 0, R = 0;
 		if (s->play_limit && s->play_samples >= s->play_limit) {
 			buf[i * 2] = buf[i * 2 + 1] = 0;
 			continue;
 		}
-		s->tick_acc += 1 << 16;
-		while (s->tick_acc >= need) {
+		/* Advance sequencer in host-sample units (same pattern as BGMDRV/OPNDRV):
+		 * accumulate tps per sample, fire a tick each time rate is reached.
+		 * Avoids (rate<<16)/tps truncation jitter that varies with buffer size. */
+		s->tick_acc += tps;
+		while (s->tick_acc >= s->rate) {
 			tick(s, 0);
-			s->tick_acc -= need;
+			s->tick_acc -= s->rate;
+			tps = ticks_per_sec(s);
+			if (tps < 1) tps = 1;
 		}
 		if (s->opna) {
 			s->chip_pos += s->chip_step;
