@@ -1,9 +1,21 @@
-# xmp-pc98 1.0.35
+# xmp-pc98 1.0.36
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.35.0**; `PLUGIN_XMPVER` **1003500**.
+VERSIONINFO **1.0.36.0**; `PLUGIN_XMPVER` **1003600**.
+
+## 1.0.36
+Eikan SSG drums sounded like sustained “waves”: opcode `84` enabled noise, but
+there was **no soft envelope**. Live driver keeps atten at `804D+ch` (same bytes
+as the SSG volume xlat); per-tick ADSR at `@0B44`/`@0DBD` attacks then decays.
+Harness debias had also relocated `804A`/`804D` → `1CEA`/`1CED`, splitting env
+from volume (and the old `1CED=7F` “mute”).
+
+- Soft ADSR on Eikan SSG (rates = voice bytes 0..4; level 0=loud..0x7F=silent)
+- Key-on: phase=0, level=0x7F; key-off: level=0x7F + mixer mute `(9<<ch)`
+- Amp = `15 - ((level+vol_a+vol_b)>>3)` matching live `@0E83`
+- Eikan SSG chip gain −9 dB (was −18)
 
 ## 1.0.35
 Eikan 3 / HSB3: song 1 “drums” were never OPNA rhythm or bank-1 FM — the NTL
@@ -66,5 +78,5 @@ Copy `xmp-pc98.dll` next to `xmplay.exe`.
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # → dist/xmp-pc98-1.0.35.zip (DLL + README + LICENSE)
+/usr/bin/make pack   # → dist/xmp-pc98-1.0.36.zip (DLL + README + LICENSE)
 ```

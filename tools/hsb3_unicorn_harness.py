@@ -387,6 +387,16 @@ class Harness:
         ah = struct.unpack_from("<HHHH", blob, 0x08A5)
         opc = [struct.unpack_from("<H", blob, 0x142A + i * 2)[0] for i in range(16)]
         print(f"Debiased: {patches} immediates (capstone-guided)")
+        # restore SSG env base 804A / volume xlat 804D (near BSS, not relocated)
+        import struct as _st
+        self.mem_w(self.music_cs, 0x0E08, _st.pack("<H", 0x804A))
+        self.mem_w(self.music_cs, 0x0E86, _st.pack("<H", 0x804D))
+        b = self.mem_r(self.music_cs, 0x06EA, 12)
+        if b[2:4] == b"\xed\x1c":
+            self.mem_w(self.music_cs, 0x06EC, _st.pack("<H", 0x804D))
+        if len(b) >= 10 and b[8:10] == b"\xef\x1c":
+            self.mem_w(self.music_cs, 0x06F2, _st.pack("<H", 0x804F))
+        print("  restored SSG env base 804A / xlat 804D")
         print(f"  AH[0..3]={ah[0]:04X} {ah[1]:04X} {ah[2]:04X} {ah[3]:04X}")
         print(f"  OPC[0..15]={' '.join(f'{x:04X}' for x in opc)}")
         print(f"  timer @00FB={blob[0xFB:0x107].hex()}")

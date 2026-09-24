@@ -45,7 +45,13 @@ struct ntl_ch {
 	int enabled, ended, ssg, conductor;
 	int pc, start, end, wait, keyed, slur, oct, vol, vol_b, detune, def_len;
 	int loop_pc, loop_n, did_loop, gate, eff;
-	int voice; /* Eikan FM instrument index (opcode 84) */
+	int voice; /* Eikan FM / SSG instrument index (opcode 84) */
+	/* Eikan SSG soft envelope @804A+ch: phase, atten level (0=loud..7F=silent),
+	 * rates[5] from voice bytes 0..4, mixer enable mask, noise period. */
+	int ssg_phase, ssg_level, ssg_tick;
+	uint8_t ssg_rate[5];
+	uint8_t ssg_mix_al; /* rotated voice[5] & 0x3F */
+	uint8_t ssg_noise;  /* 0xFF = none */
 };
 
 struct ntl_state {
@@ -214,6 +220,87 @@ static void apply_voice(ntl_state *s, int c, int idx, int vol)
 	wrx(s, ext, (uint8_t)(0xB4 + slot), 0xC0);
 }
 
+
+/* Live volume @0E83: amp = 15 - ((env_level + vol_a + vol_b) >> 3), env at 804D+ch. */
+static void ssg_write_amp(ntl_state *s, int c)
+{
+	ntl_ch *ch = &s->ch[c];
+	int ssgc = c >= 6 ? c - 6 : 0;
+	int atten, amp;
+	if (!s->eikan) {
+		atten = (ch->vol & 15);
+		wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(atten & 15));
+		return;
+	}
+	atten = (ch->ssg_level & 0x7F) + (ch->vol & 0x7F) + (ch->vol_b & 0x7F);
+	if (atten > 127) atten = 127;
+	amp = 15 - (atten >> 3);
+	if (amp < 0) amp = 0;
+	wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)amp);
+}
+
+/* Per-tick soft ADSR (handlers @0DBD/@0DC7/@0DD8/@0DF1). */
+static void ssg_env_tick(ntl_state *s, int c)
+{
+	ntl_ch *ch = &s->ch[c];
+	int level, phase;
+	if (!ch->ssg || !s->eikan) return;
+	level = ch->ssg_level & 0x7F;
+	phase = ch->ssg_phase & 3;
+	ch->ssg_tick++;
+	switch (phase) {
+	case 0: /* attack: subtract rate0 from atten (→ louder) */
+		level -= ch->ssg_rate[0];
+		if (level < 0) {
+			level = 0;
+			ch->ssg_phase = 1;
+		}
+		break;
+	case 1: /* decay to sustain target rate4 */
+		level += ch->ssg_rate[1];
+		if (level >= ch->ssg_rate[4]) {
+			ch->ssg_phase = 2;
+			if (level > 0x7F) level = 0x7F;
+		}
+		break;
+	case 2: /* sustain-ish, every 8 ticks */
+		if ((ch->ssg_tick & 7) == 0) {
+			level += ch->ssg_rate[2];
+			if (level > 0x7F) {
+				if (ch->ssg_rate[2] & 0x80) level = 0;
+				else level = 0x7F;
+			}
+		}
+		break;
+	default: /* release-ish, every 4 ticks */
+		if ((ch->ssg_tick & 3) == 0) {
+			level += ch->ssg_rate[3];
+			if (level > 0x7F) level = 0x7F;
+		}
+		break;
+	}
+	ch->ssg_level = level & 0x7F;
+	if (ch->keyed || level < 0x7F)
+		ssg_write_amp(s, c);
+}
+
+static void ssg_keyon_env(ntl_state *s, int c)
+{
+	ntl_ch *ch = &s->ch[c];
+	int ssgc = c >= 6 ? c - 6 : 0;
+	uint8_t chmask;
+	/* Live @1023: phase=0, level=7F (attack from silence) */
+	ch->ssg_phase = 0;
+	ch->ssg_level = 0x7F;
+	ch->ssg_tick = 0;
+	chmask = (uint8_t)(9 << ssgc);
+	s->ssg_mix = (uint8_t)(ch->ssg_mix_al & (s->ssg_mix | chmask));
+	wr(s, 0x07, s->ssg_mix);
+	if (ch->ssg_noise != 0xFF)
+		wr(s, 0x06, ch->ssg_noise);
+	ssg_write_amp(s, c);
+}
+
 /* Eikan SSG program (opcode 84 → JT type-2 @10CC): mute amp, set mixer
  * tone/noise enable from voice[5] (ROL by ch, AND into shadow), optional
  * noise period voice[6] when voice[5] < 0xFE. Song1 "drums" = noise on SSG C. */
@@ -223,21 +310,28 @@ static void apply_ssg_voice(ntl_state *s, int c, int idx)
 	int ssgc = c >= 6 ? c - 6 : 0;
 	const uint8_t *v;
 	uint8_t mix_byte, al, chmask;
+	int i;
 	if (!ch->ssg || idx < 0 || idx >= 16 || !s->voice_ssg_ok[idx])
 		return;
 	v = s->voices_ssg[idx];
+	for (i = 0; i < 5; ++i)
+		ch->ssg_rate[i] = v[i];
 	wr(s, (uint8_t)(0x08 + ssgc), 0);
 	mix_byte = v[5];
 	al = mix_byte;
-	/* rol al, cl  (cl = ssgc) */
 	if (ssgc)
 		al = (uint8_t)(((al << ssgc) | (al >> (8 - ssgc))) & 0xFF);
 	al = (uint8_t)(al & 0x3F);
-	chmask = (uint8_t)(9 << ssgc); /* tone+noise disable bits for this ch */
+	ch->ssg_mix_al = al;
+	ch->ssg_noise = (mix_byte < 0xFE) ? v[6] : 0xFF;
+	chmask = (uint8_t)(9 << ssgc);
 	s->ssg_mix = (uint8_t)(al & (s->ssg_mix | chmask));
 	wr(s, 0x07, s->ssg_mix);
-	if (mix_byte < 0xFE)
-		wr(s, 0x06, v[6]);
+	if (ch->ssg_noise != 0xFF)
+		wr(s, 0x06, ch->ssg_noise);
+	/* Start silent until next keyon (live sets level via 804D). */
+	ch->ssg_phase = 3;
+	ch->ssg_level = 0x7F;
 }
 
 static int key_id(int c)
@@ -248,9 +342,19 @@ static int key_id(int c)
 static void keyoff(ntl_state *s, int c)
 {
 	ntl_ch *ch = &s->ch[c];
-	if (ch->ssg)
-		wr(s, (uint8_t)(0x08 + (c >= 6 ? c - 6 : 0)), 0);
-	else
+	if (ch->ssg) {
+		int ssgc = c >= 6 ? c - 6 : 0;
+		if (s->eikan) {
+			/* Live @0C25: level=7F, or mixer with (9<<ch) */
+			ch->ssg_level = 0x7F;
+			ch->ssg_phase = 3;
+			s->ssg_mix |= (uint8_t)(9 << ssgc);
+			wr(s, 0x07, s->ssg_mix);
+			ssg_write_amp(s, c);
+		} else {
+			wr(s, (uint8_t)(0x08 + ssgc), 0);
+		}
+	} else
 		wr(s, 0x28, (uint8_t)key_id(c));
 	ch->keyed = 0;
 }
@@ -276,13 +380,10 @@ static void play_note(ntl_state *s, int c, int name, int dry)
 		ssgc = c >= 6 ? c - 6 : 0;
 		wr(s, (uint8_t)(ssgc * 2), (uint8_t)per);
 		wr(s, (uint8_t)(ssgc * 2 + 1), (uint8_t)(per >> 8));
-		{
-			int lvl = s->eikan ? (eikan_atten(ch) >> 3) : (ch->vol & 15);
-			if (s->eikan) lvl = 15 - lvl;
-			wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(lvl & 15));
-		}
-		/* Non-Eikan: enable tone. Eikan: opcode 84 owns mixer (tone vs noise). */
-		if (!s->eikan) {
+		if (s->eikan) {
+			ssg_keyon_env(s, c);
+		} else {
+			wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(ch->vol & 15));
 			s->ssg_mix &= (uint8_t)~(1 << ssgc);
 			wr(s, 0x07, s->ssg_mix);
 		}
@@ -338,11 +439,8 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 				ch->vol_b = a & 0x7F;
 				if (!dry && !ch->ssg)
 					apply_eikan_tl(s, c);
-				else if (!dry && ch->ssg && ch->keyed) {
-					int lvl = eikan_atten(ch) >> 3;
-					int ssgc = c >= 6 ? c - 6 : 0;
-					wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(15 - lvl));
-				}
+				else if (!dry && ch->ssg && ch->keyed)
+					ssg_write_amp(s, c);
 			}
 			return;
 		case 0x84: /* instrument program (not volume!) */
@@ -437,12 +535,8 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 				ch->vol = a & 0x7F;
 				if (!dry && !ch->ssg)
 					apply_eikan_tl(s, c);
-				else if (!dry && ch->ssg) {
-					/* SSG: (vol_a+vol_b)>>3 inverted → level 0..15 */
-					int lvl = eikan_atten(ch) >> 3;
-					int ssgc = c >= 6 ? c - 6 : 0;
-					wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(15 - lvl));
-				}
+				else if (!dry && ch->ssg)
+					ssg_write_amp(s, c);
 			}
 			return;
 		case 0x90: {
@@ -627,6 +721,8 @@ static void irq(ntl_state *s, int dry, int measure)
 			if (!(ch->pc < (int)s->file.size() && s->file[ch->pc] == 0x82))
 				keyoff(s, i);
 		}
+		if (s->eikan && !dry && ch->ssg)
+			ssg_env_tick(s, i);
 	}
 	if (!live) s->ended = 1;
 }
@@ -652,7 +748,7 @@ static void reset_chip(ntl_state *s)
 	if (!s->opna) return;
 	s->opna->reset();
 	s->opna->setfmvolume(32768);
-	s->opna->setpsgvolume(fmgen_vol(-18.0));
+	s->opna->setpsgvolume(fmgen_vol(s->eikan ? -9.0 : -18.0));
 	wr(s, 0x29, 0x80);
 	wr(s, 0x27, 0x30);
 	wr(s, 0x07, 0xB8);
@@ -828,6 +924,12 @@ static void reset_play(ntl_state *s, int dry)
 		s->ch[i].gate = 0;
 		s->ch[i].eff = 0;
 		s->ch[i].voice = 0;
+		s->ch[i].ssg_phase = 3;
+		s->ch[i].ssg_level = 0x7F;
+		s->ch[i].ssg_tick = 0;
+		s->ch[i].ssg_mix_al = 0x3F;
+		s->ch[i].ssg_noise = 0xFF;
+		memset(s->ch[i].ssg_rate, 0, sizeof s->ch[i].ssg_rate);
 		if (!s->ch[i].ssg && !s->ch[i].conductor && !dry) {
 			if (s->eikan)
 				apply_voice(s, i, s->ch[i].voice, eikan_atten(&s->ch[i]));
