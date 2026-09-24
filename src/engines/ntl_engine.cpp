@@ -71,6 +71,8 @@ struct ntl_state {
 	int64_t eikan_pit_acc, eikan_pit_step;
 	uint8_t voices[32][32]; /* Eikan FM bank from NTL (idx*32) */
 	int voice_ok[32];
+	uint8_t voices_ssg[16][16]; /* Eikan SSG bank (idx*16): env[5], mix, noise, ... */
+	int voice_ssg_ok[16];
 
 	ntl_state()
 		: eikan(0), opna(NULL), rate(PC98_DEFAULT_RATE), loops_want(1), one_loop_ms(0),
@@ -86,6 +88,8 @@ struct ntl_state {
 		memset(ch, 0, sizeof ch);
 		memset(voices, 0, sizeof voices);
 		memset(voice_ok, 0, sizeof voice_ok);
+		memset(voices_ssg, 0, sizeof voices_ssg);
+		memset(voice_ssg_ok, 0, sizeof voice_ssg_ok);
 		title[0] = 0;
 		game[0] = 0;
 	}
@@ -210,6 +214,32 @@ static void apply_voice(ntl_state *s, int c, int idx, int vol)
 	wrx(s, ext, (uint8_t)(0xB4 + slot), 0xC0);
 }
 
+/* Eikan SSG program (opcode 84 → JT type-2 @10CC): mute amp, set mixer
+ * tone/noise enable from voice[5] (ROL by ch, AND into shadow), optional
+ * noise period voice[6] when voice[5] < 0xFE. Song1 "drums" = noise on SSG C. */
+static void apply_ssg_voice(ntl_state *s, int c, int idx)
+{
+	ntl_ch *ch = &s->ch[c];
+	int ssgc = c >= 6 ? c - 6 : 0;
+	const uint8_t *v;
+	uint8_t mix_byte, al, chmask;
+	if (!ch->ssg || idx < 0 || idx >= 16 || !s->voice_ssg_ok[idx])
+		return;
+	v = s->voices_ssg[idx];
+	wr(s, (uint8_t)(0x08 + ssgc), 0);
+	mix_byte = v[5];
+	al = mix_byte;
+	/* rol al, cl  (cl = ssgc) */
+	if (ssgc)
+		al = (uint8_t)(((al << ssgc) | (al >> (8 - ssgc))) & 0xFF);
+	al = (uint8_t)(al & 0x3F);
+	chmask = (uint8_t)(9 << ssgc); /* tone+noise disable bits for this ch */
+	s->ssg_mix = (uint8_t)(al & (s->ssg_mix | chmask));
+	wr(s, 0x07, s->ssg_mix);
+	if (mix_byte < 0xFE)
+		wr(s, 0x06, v[6]);
+}
+
 static int key_id(int c)
 {
 	return c >= 3 ? (c - 3 + 4) : c;
@@ -251,8 +281,11 @@ static void play_note(ntl_state *s, int c, int name, int dry)
 			if (s->eikan) lvl = 15 - lvl;
 			wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(lvl & 15));
 		}
-		s->ssg_mix &= (uint8_t)~(1 << ssgc);
-		wr(s, 0x07, s->ssg_mix);
+		/* Non-Eikan: enable tone. Eikan: opcode 84 owns mixer (tone vs noise). */
+		if (!s->eikan) {
+			s->ssg_mix &= (uint8_t)~(1 << ssgc);
+			wr(s, 0x07, s->ssg_mix);
+		}
 		ch->keyed = 1;
 		return;
 	}
@@ -305,13 +338,24 @@ static void do_cmd(ntl_state *s, int c, int cmd, int dry, int measure)
 				ch->vol_b = a & 0x7F;
 				if (!dry && !ch->ssg)
 					apply_eikan_tl(s, c);
+				else if (!dry && ch->ssg && ch->keyed) {
+					int lvl = eikan_atten(ch) >> 3;
+					int ssgc = c >= 6 ? c - 6 : 0;
+					wr(s, (uint8_t)(0x08 + ssgc), (uint8_t)(15 - lvl));
+				}
 			}
 			return;
 		case 0x84: /* instrument program (not volume!) */
 			if (fetchb(s, ch, &a)) {
-				ch->voice = a & 31;
-				if (!dry && !ch->ssg)
-					apply_voice(s, c, ch->voice, eikan_atten(ch));
+				if (ch->ssg) {
+					ch->voice = a & 15;
+					if (!dry)
+						apply_ssg_voice(s, c, ch->voice);
+				} else {
+					ch->voice = a & 31;
+					if (!dry)
+						apply_voice(s, c, ch->voice, eikan_atten(ch));
+				}
 			}
 			return;
 		case 0x85:
@@ -717,8 +761,9 @@ static int parse_header(ntl_state *s)
 	 * idx_byte + 32 data bytes. */
 	if (s->eikan) {
 		int bx = 4 + cnt * 3;
-		int n_fm, off_fm, j, idx, src;
+		int n_fm, off_fm, n_ssg, off_ssg, j, idx, src;
 		memset(s->voice_ok, 0, sizeof s->voice_ok);
+		memset(s->voice_ssg_ok, 0, sizeof s->voice_ssg_ok);
 		if (bx + 6 <= (int)n) {
 			n_fm = d[bx];
 			off_fm = (int)rd16(d + bx + 1);
@@ -728,6 +773,15 @@ static int parse_header(ntl_state *s)
 				memcpy(s->voices[idx], d + src, 32);
 				s->voice_ok[idx] = 1;
 				src += 32;
+			}
+			n_ssg = d[bx + 3];
+			off_ssg = (int)rd16(d + bx + 4);
+			src = 3 + off_ssg;
+			for (j = 0; j < n_ssg && src + 17 <= (int)n; ++j) {
+				idx = d[src++] & 15;
+				memcpy(s->voices_ssg[idx], d + src, 16);
+				s->voice_ssg_ok[idx] = 1;
+				src += 16;
 			}
 		}
 	}
@@ -752,7 +806,7 @@ static void reset_play(ntl_state *s, int dry)
 	s->play_samples = 0;
 	s->last_l = s->last_r = 0;
 	s->tb = 0xC0;
-	s->ssg_mix = 0xB8;
+	s->ssg_mix = s->eikan ? 0x3F : 0xB8;
 	s->eikan_rate = 0x5000;
 	s->eikan_acc = 0;
 	s->song_looped = 0;

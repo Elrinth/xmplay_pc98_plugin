@@ -46,18 +46,24 @@ class ChipLog:
         self.addr = [0, 0]
         self.regs = [bytearray(256), bytearray(256)]
         self.writes: list[tuple[int, str, int, int, int]] = []
-        self.midi: list[tuple[int, int]] = []
+        self.midi: list[tuple] = []
         self.tick = 0
         self.ports: set[int] = set()
 
     def in_port(self, port: int, size: int) -> int:
         port &= 0xFFFF
         self.ports.add(port)
+        # MPU-PC98 / MIDI: status ready (bit0=0 means Tx ready on some; FE=OK)
         if port == 0xE0D0:
             return 0xFE
         if port == 0xE0D2:
             return 0x00
+        # PC-9801-86: A460h machine ID / sound — bit0=0 means 86 present (OPNA)
+        # Common values: 0xFC (86), 0xFF (no 86). Return 0xFC so HSB3 keeps OPNA.
+        if port == 0xA460:
+            return 0xFC
         if port in (0x188, 0x18C, 0x088, 0x08C):
+            # OPNA status: bit7 busy=0
             return 0x00
         if port == 0x18A:
             return self.regs[0][self.addr[0]]
@@ -79,8 +85,9 @@ class ChipLog:
         elif port in (0x18E, 0x08E):
             self.regs[1][self.addr[1]] = v8
             self.writes.append((self.tick, "OPNA", 1, self.addr[1], v8))
-        elif port in (0xC8D2, 0xC8D3, 0xA4D2, 0xA4D3, 0x00F2, 0x7E0, 0x7E2, 0x7E8):
-            self.midi.append((self.tick, v8))
+        elif port in (0xE0D0, 0xE0D2, 0xC8D2, 0xC8D3, 0xA4D2, 0xA4D3,
+                      0x00F2, 0x7E0, 0x7E2, 0x7E8):
+            self.midi.append((self.tick, port, v8))
 
 
 class Harness:
@@ -584,8 +591,13 @@ def main() -> int:
         f.write(f"# ports={sorted(h.chip.ports)}\n")
         for tick, chip, page, reg, val in h.chip.writes:
             f.write(f"{tick:6d} {chip} p{page} r{reg:02X}={val:02X}\n")
-        for tick, b in h.chip.midi:
-            f.write(f"{tick:6d} MIDI {b:02X}\n")
+        for item in h.chip.midi:
+            if len(item) == 3:
+                tick, port, b = item
+                f.write(f"{tick:6d} MIDI p{port:04X} {b:02X}\n")
+            else:
+                tick, b = item
+                f.write(f"{tick:6d} MIDI {b:02X}\n")
     print(f"Wrote {out} ({len(h.chip.writes)} OPNA, {len(h.chip.midi)} MIDI)")
     print(f"Ports: {sorted(h.chip.ports)}")
     return 0 if len(h.chip.writes) > 10 else 2

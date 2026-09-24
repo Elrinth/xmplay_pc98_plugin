@@ -1,9 +1,21 @@
-# xmp-pc98 1.0.34
+# xmp-pc98 1.0.35
 
 Native **32-bit** XMPlay input plugin for NEC PC-98 music.
 Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
-VERSIONINFO **1.0.34.0**; `PLUGIN_XMPVER` **1003400**.
+VERSIONINFO **1.0.35.0**; `PLUGIN_XMPVER` **1003500**.
+
+## 1.0.35
+Eikan 3 / HSB3: song 1 “drums” were never OPNA rhythm or bank-1 FM — the NTL
+header only has FM ch1–3 + SSG A/B/C. Percussion is **SSG noise on channel C**
+(opcode `84` SSG program 1: mixer enables noise, period reg 6 = 7).
+
+- Load SSG voice bank (`[n_ssg][off16]`, 16 bytes/voice) next to the FM bank
+- Opcode `84` on SSG → apply mixer mask + optional noise period (live `@10CC`)
+- Eikan key-on no longer forces tone-enable (would kill noise-only programs)
+- Init mixer `0x3F` for Eikan (match driver)
+
+Authority: user HW MP3 (harness SSG amp stays muted via `[0x1CED]=0x7F`).
 
 ## 1.0.34
 
@@ -54,5 +66,5 @@ Copy `xmp-pc98.dll` next to `xmplay.exe`.
 
 ```bash
 /usr/bin/make dll
-/usr/bin/make pack   # → dist/xmp-pc98-1.0.34.zip (DLL + README + LICENSE)
+/usr/bin/make pack   # → dist/xmp-pc98-1.0.35.zip (DLL + README + LICENSE)
 ```
