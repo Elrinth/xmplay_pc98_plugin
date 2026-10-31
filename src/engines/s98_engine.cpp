@@ -4,6 +4,7 @@
  * Mix at 55466 Hz (S98Amp Frequency) then interpolate to the XMPlay rate.
  */
 #include "s98_engine.h"
+#include "vgm_conv.h"
 #include "pc98_util.h"
 
 #include <stdlib.h>
@@ -91,6 +92,7 @@ struct s98_state {
 	size_t pc;
 	int64_t wait_left;
 	double samples_per_sync;
+	double sync_frac;
 	int64_t chip_acc[S98_MAX_DEV];
 	int mute_fm, mute_ssg, mute_rhythm, mute_adpcm;
 	int ssg_atten_db; /* in_s98: 18 on PC-9801, 8 on PC-8801; -1 = chip default */
@@ -299,7 +301,11 @@ static void chip_tick(s98_chip *c, const s98_state *s)
 
 static int64_t sync_to_samples(s98_state *s, int nsync)
 {
-	return (int64_t)(s->samples_per_sync * (double)nsync + 0.5);
+	/* Carry the fraction: VGM syncs are 1/44100 s, ~1.26 mix samples each. */
+	double t = s->samples_per_sync * (double)nsync + s->sync_frac;
+	int64_t n = (int64_t)t;
+	s->sync_frac = t - (double)n;
+	return n;
 }
 
 static int run_until_wait(s98_state *s)
@@ -377,6 +383,7 @@ static void reset_play(s98_state *s)
 	int i;
 	s->pc = s->dump_ofs;
 	s->wait_left = 0;
+	s->sync_frac = 0;
 	s->loops_done = 0;
 	s->ended = 0;
 	for (i = 0; i < s->ndev; ++i) {
@@ -407,6 +414,17 @@ int s98_analyze(const uint8_t *data, size_t len, const pc98_cfg *cfg, pc98_info 
 	int looping = 0;
 	if (!out) return -1;
 	memset(out, 0, sizeof *out);
+	if (!s98_probe(data, len) && vgm_probe_mem(data, len)) {
+		size_t n = 0;
+		uint8_t *img = vgm_to_s98(data, len, &n);
+		int r = img ? s98_analyze(img, n, cfg, out) : -1;
+		free(img);
+		if (r == 0) {
+			bounded(out->filetype, sizeof out->filetype, "VGM");
+			bounded(out->engine, sizeof out->engine, "fmgen VGM");
+		}
+		return r;
+	}
 	if (!s98_probe(data, len)) return -1;
 	tmp.rate = cfg && cfg->rate > 0 ? cfg->rate : PC98_DEFAULT_RATE;
 	tmp.mix_rate = S98_MIX_RATE;
@@ -431,6 +449,13 @@ void *s98_open(const uint8_t *data, size_t len, const pc98_cfg *cfg)
 {
 	s98_state *s;
 	int i, looping = 0;
+	if (!s98_probe(data, len) && vgm_probe_mem(data, len)) {
+		size_t n = 0;
+		uint8_t *img = vgm_to_s98(data, len, &n);
+		void *h = img ? s98_open(img, n, cfg) : NULL;
+		free(img);
+		return h;
+	}
 	if (!s98_probe(data, len)) return NULL;
 	s = new s98_state();
 	s->rate = cfg && cfg->rate > 0 ? cfg->rate : PC98_DEFAULT_RATE;
@@ -534,7 +559,7 @@ int s98_seek_ms(void *h, int ms)
 	int64_t target, pos;
 	if (!s || ms < 0) return -1;
 	reset_play(s);
-	target = ((int64_t)ms * s->rate) / 1000;
+	target = ((int64_t)ms * s->mix_rate) / 1000;
 	pos = 0;
 	while (pos < target && !s->ended) {
 		if (run_until_wait(s) < 0) break;
@@ -545,7 +570,7 @@ int s98_seek_ms(void *h, int ms)
 			pos += step;
 		}
 	}
-	return (int)((pos * 1000) / s->rate);
+	return (int)((pos * 1000) / s->mix_rate);
 }
 
 int s98_one_loop_ms(void *h)

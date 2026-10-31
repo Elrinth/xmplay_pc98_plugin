@@ -490,6 +490,8 @@ int main(void)
 		PC98_KIND_GNTL, "G_KOSIN3.NTL CheckFile peek");
 	test_xmplay_peek("D:\\spel\\pc98\\pc98 music\\N\\night_s_98\\NSA02.MFD",
 		PC98_KIND_MFDMIDI, "NSA02.MFD CheckFile peek (not Hoot sidecar)");
+	test_xmplay_peek("F:\\YeOldeDisk\\Musik\\S98 (Pc98 AND PC88)\\Starfire (PC-98)(1994-10-14)(Starcraft)\\02 Title Screen.vgm",
+		PC98_KIND_S98, "Starfire YM2608 .vgm CheckFile peek");
 	test_setfile();
 	test_fmp_header();
 	test_live_sidecars();
@@ -500,6 +502,8 @@ int main(void)
 		PC98_KIND_MFD, "NSA02.USO energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\night_s_98\\NSA02.MFD",
 		PC98_KIND_MFDMIDI, "NSA02.MFD energy");
+	test_live_energy("F:\\YeOldeDisk\\Musik\\S98 (Pc98 AND PC88)\\Starfire (PC-98)(1994-10-14)(Starcraft)\\02 Title Screen.vgm",
+		PC98_KIND_S98, "Starfire .vgm energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\n3gpbl98\\OPENING.MDT",
 		PC98_KIND_N3G, "OPENING.MDT energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\nightsft_98\\NS01.LSP",

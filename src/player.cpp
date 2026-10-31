@@ -1,6 +1,7 @@
 #include "pc98.h"
 #include "pc98_util.h"
 #include "engines/s98_engine.h"
+#include "engines/vgm_conv.h"
 #include "engines/pmd_engine.h"
 #include "engines/fmp_engine.h"
 #include "engines/hoot_engine.h"
@@ -55,6 +56,9 @@ static int banned_name(const char *filename)
 
 pc98_kind pc98_probe(const char *filename, const uint8_t *data, size_t len)
 {
+	/* YM2203/YM2608-only VGM/VGZ (PC-98/PC-88 rips); other VGMs stay banned. */
+	if (vgm_probe_mem(data, len))
+		return PC98_KIND_S98;
 	if (banned_name(filename))
 		return PC98_KIND_NONE;
 	if (filename && pc98_iends(filename, ".pac") &&
@@ -176,8 +180,6 @@ pc98_player *pc98_player_open(const char *filename, const uint8_t *data, size_t 
 		if (s98_artist(p->eng)[0]) pc98_bounded(p->artist, sizeof p->artist, s98_artist(p->eng));
 		if (s98_game(p->eng)[0]) pc98_bounded(p->game, sizeof p->game, s98_game(p->eng));
 		p->one_loop_ms[0] = s98_one_loop_ms(p->eng);
-		pc98_bounded(p->filetype, sizeof p->filetype, "S98");
-		pc98_bounded(p->engine, sizeof p->engine, "fmgen S98");
 	} else if (k == PC98_KIND_PMD) {
 		p->eng = pmd_open_mem(filename, data, len, &p->cfg);
 		if (!p->eng) { free(p); return NULL; }

@@ -5,6 +5,18 @@ Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
 VERSIONINFO **1.0.36.0**; `PLUGIN_XMPVER` **1003600**.
 
+## 1.0.113 — PC-98 / PC-88 `.vgm` / `.vgz`
+
+- VGM rips whose only chips are YM2608 and/or YM2203 (PC-9801-86/-26K, PC-88;
+  e.g. Starfire) now play here. The stream is rewritten as an in-memory S98 v3
+  (1/44100 s sync, VGM loop offset kept) and runs through the same cisc fmgen
+  path as S98, so loop count, seek, mute and OPNA rhythm samples behave the same.
+  GD3 title/game/artist become the tags (English, else Japanese).
+- Any other chip in the header (SN76489, YM2612, YM2151, OPL, …) is still
+  left to xmp-gamemusic. `.vgz` is inflated with miniz.
+- S98 seek landed short (output-rate samples counted against 55466 Hz mix
+  waits); sync waits now carry the fractional mix sample instead of rounding.
+
 ## 1.0.112 — MFD.COM `.MFD` (GS)
 
 - U.Kakenasi MFD.COM 1.8 MIDI songs (Night Slave `NSA##.MFD`, …) now play natively

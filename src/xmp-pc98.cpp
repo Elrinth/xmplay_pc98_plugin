@@ -291,7 +291,7 @@ static float info_sec(int one_ms)
 
 static void WINAPI pc_About(HWND win)
 {
-	char buf[2800];
+	char buf[3200];
 	snprintf(buf, sizeof buf,
 		PLUGIN_NAME " " PLUGIN_VERSION "\r\n"
 		"Native XMPlay input plugin for NEC PC-98 music.\r\n"
@@ -299,11 +299,13 @@ static void WINAPI pc_About(HWND win)
 		"FMP (optional WinFMP.dll), BGMDRV .MUS, Packen NA .O, Melody\r\n"
 		"USO, MFD.COM .MFD (GS/SC-55 SF2), N3G .MDT, Synthia .PAI, MBMUS .MSB, OPNDRV .MD,\r\n"
 		"ArtDink .NTL (F_* FM, G_* GM/SF2) and MUSIC.PAC (Eikan 3 multi-song), Kajihara MMD.COM .MMD (GS/SC-55 SF2), FUGA packed .GMD/.MMD (SC-55 / CM-64 SF2),\r\n"
+		"YM2608/YM2203 .VGM/.VGZ (through the S98 path),\r\n"
 		"and Hoot sets via hootrip.\r\n\r\n"
 		"This is NOT a wrap of S98Amp / in_s98.dll, in_fmpmd.dll, or ZXTune.\r\n"
 		"Delete or disable S98Amp, in_fmpmd, and ZXTune's S98/.M claims\r\n"
 		"so they do not fight this plugin. ZXTune .M is ZX Spectrum, not PMD.\r\n"
-		"We do not claim .vgm/.vgz (xmp-gamemusic) or .sap (xmp-pokey).\r\n"
+		"VGM/VGZ only when the chips are YM2608/YM2203 (PC-98/PC-88 rips);\r\n"
+		"other .vgm/.vgz stay with xmp-gamemusic. .sap is xmp-pokey.\r\n"
 		"We do not claim .mid (XMPlay MIDI), .mml source, or .com/.exe.\r\n\r\n"
 		"CheckFile probes a 256-byte peek (S98, PMD/FMP/BGMDRV/NA/USO/MFD/MDT/PAI,\r\n"
 		"MSB/MD/NTL/PAC/GMD, set.pc98). G_*.NTL is GM (SF2), not OPNA. .PAC only if ArtDink size-table. .O is claimed only if it looks like Packen NA, not\r\n"
@@ -969,7 +971,7 @@ static void WINAPI pc_SetConfig(void *config, DWORD size)
 }
 
 static const char g_exts[] =
-	"PC-98 / S98\0s98/m/m2/ms/mp/mz/opi/ovi/ozi/fmd/mmd/gmd/mus/uso/mfd/o/mdt/msb/ntl/pac/md/pc98";
+	"PC-98 / S98\0s98/m/m2/ms/mp/mz/opi/ovi/ozi/fmd/mmd/gmd/mus/uso/mfd/o/mdt/msb/ntl/pac/md/pc98/vgm/vgz";
 
 static XMPIN g_xmpin = {
 	XMPIN_FLAG_CONFIG | XMPIN_FLAG_OPTIONS,
