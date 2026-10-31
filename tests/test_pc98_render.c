@@ -488,6 +488,8 @@ int main(void)
 		PC98_KIND_GNTL, "G_GOOD_B.NTL CheckFile peek");
 	test_xmplay_peek("D:\\spel\\pc98\\pc98 music\\K\\k_sekiga_98\\G_KOSIN3.NTL",
 		PC98_KIND_GNTL, "G_KOSIN3.NTL CheckFile peek");
+	test_xmplay_peek("D:\\spel\\pc98\\pc98 music\\N\\night_s_98\\NSA02.MFD",
+		PC98_KIND_MFDMIDI, "NSA02.MFD CheckFile peek (not Hoot sidecar)");
 	test_setfile();
 	test_fmp_header();
 	test_live_sidecars();
@@ -496,6 +498,8 @@ int main(void)
 		PC98_KIND_NA, "DT01.O energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\night_s_98\\NSA02.USO",
 		PC98_KIND_MFD, "NSA02.USO energy");
+	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\night_s_98\\NSA02.MFD",
+		PC98_KIND_MFDMIDI, "NSA02.MFD energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\n3gpbl98\\OPENING.MDT",
 		PC98_KIND_N3G, "OPENING.MDT energy");
 	test_live_energy("D:\\spel\\pc98\\pc98 music\\N\\nightsft_98\\NS01.LSP",

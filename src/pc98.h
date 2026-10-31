@@ -36,7 +36,8 @@ typedef enum {
 	PC98_KIND_FMD,
 	PC98_KIND_MSDRV,
 	PC98_KIND_MMD,
-	PC98_KIND_PAC
+	PC98_KIND_PAC,
+	PC98_KIND_MFDMIDI
 } pc98_kind;
 
 typedef struct {

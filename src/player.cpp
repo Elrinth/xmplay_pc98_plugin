@@ -17,6 +17,7 @@
 #include "engines/mmd_engine.h"
 #include "engines/pac_engine.h"
 #include "engines/msdrv_engine.h"
+#include "engines/mfdmidi_engine.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +68,9 @@ pc98_kind pc98_probe(const char *filename, const uint8_t *data, size_t len)
 	if (mfd_probe_mem(data, len) &&
 			(!filename || pc98_iends(filename, ".uso")))
 		return PC98_KIND_MFD;
+	/* .MFD next to a set.pc98 is otherwise taken as a Hoot sidecar. */
+	if (mfdmidi_probe_mem(data, len))
+		return PC98_KIND_MFDMIDI;
 	if (n3g_probe_mem(data, len) &&
 			(!filename || pc98_iends(filename, ".mdt")))
 		return PC98_KIND_N3G;
@@ -121,6 +125,7 @@ int pc98_analyze(const char *filename, const uint8_t *data, size_t len,
 	if (k == PC98_KIND_NTL) return ntl_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_GNTL) return gntl_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_PAC) return pac_analyze_mem(filename, data, len, cfg, out);
+	if (k == PC98_KIND_MFDMIDI) return mfdmidi_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_MMD) return mmd_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_FMD) return fmd_analyze_mem(filename, data, len, cfg, out);
 	if (k == PC98_KIND_BGMDRV) return bgmdrv_analyze_mem(filename, data, len, cfg, out);
@@ -316,6 +321,15 @@ pc98_player *pc98_player_open(const char *filename, const uint8_t *data, size_t 
 		p->one_loop_ms[0] = fmd_one_loop_ms_h(p->eng);
 		pc98_bounded(p->filetype, sizeof p->filetype, fmd_type_h(p->eng));
 		pc98_bounded(p->engine, sizeof p->engine, fmd_engine_h(p->eng));
+	} else if (k == PC98_KIND_MFDMIDI) {
+		p->eng = mfdmidi_open_mem(filename, data, len, &p->cfg);
+		if (!p->eng) { free(p); return NULL; }
+		mfdmidi_analyze_mem(filename, data, len, &p->cfg, &inf);
+		fill_from_info(p, &inf);
+		p->one_loop_ms[0] = mfdmidi_one_loop_ms_h(p->eng);
+		pc98_bounded(p->engine, sizeof p->engine, mfdmidi_engine_h(p->eng));
+		pc98_bounded(p->chip, sizeof p->chip, "Roland GS (SC-55)");
+		pc98_bounded(p->sf2, sizeof p->sf2, mfdmidi_sf2_h(p->eng));
 	} else if (k == PC98_KIND_PAC) {
 		p->eng = pac_open_mem(filename, data, len, &p->cfg);
 		if (!p->eng) { free(p); return NULL; }
@@ -363,6 +377,7 @@ void pc98_player_close(pc98_player *p)
 	else if (p->kind == PC98_KIND_GNTL) gntl_close_h(p->eng);
 	else if (p->kind == PC98_KIND_MMD) mmd_close_h(p->eng);
 	else if (p->kind == PC98_KIND_PAC) pac_close_h(p->eng);
+	else if (p->kind == PC98_KIND_MFDMIDI) mfdmidi_close_h(p->eng);
 	else if (p->kind == PC98_KIND_FMD) fmd_close_h(p->eng);
 	else if (p->kind == PC98_KIND_SET) hoot_close_h(p->eng);
 	free(p);
@@ -386,6 +401,7 @@ int pc98_player_process(pc98_player *p, float *buf, int count)
 	if (p->kind == PC98_KIND_GNTL) return gntl_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_MMD) return mmd_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_PAC) return pac_process_h(p->eng, buf, count);
+	if (p->kind == PC98_KIND_MFDMIDI) return mfdmidi_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_FMD) return fmd_process_h(p->eng, buf, count);
 	if (p->kind == PC98_KIND_SET) return hoot_process_h(p->eng, buf, count);
 	return 0;
@@ -409,6 +425,7 @@ int pc98_player_seek_ms(pc98_player *p, int ms)
 	if (p->kind == PC98_KIND_GNTL) return gntl_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_MMD) return mmd_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_PAC) return pac_seek_ms_h(p->eng, ms);
+	if (p->kind == PC98_KIND_MFDMIDI) return mfdmidi_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_FMD) return fmd_seek_ms_h(p->eng, ms);
 	if (p->kind == PC98_KIND_SET) return hoot_seek_ms_h(p->eng, ms);
 	return -1;
@@ -456,6 +473,7 @@ int pc98_player_rate(const pc98_player *p)
 	if (p->kind == PC98_KIND_GNTL) return gntl_rate_h(p->eng);
 	if (p->kind == PC98_KIND_MMD) return mmd_rate_h(p->eng);
 	if (p->kind == PC98_KIND_PAC) return pac_rate_h(p->eng);
+	if (p->kind == PC98_KIND_MFDMIDI) return mfdmidi_rate_h(p->eng);
 	if (p->kind == PC98_KIND_FMD) return fmd_rate_h(p->eng);
 	if (p->kind == PC98_KIND_SET) return hoot_rate_h(p->eng);
 	return PC98_DEFAULT_RATE;
@@ -516,6 +534,7 @@ void pc98_player_set_loop_count(pc98_player *p, int loops)
 	else if (p->kind == PC98_KIND_GNTL) gntl_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_MMD) mmd_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_PAC) pac_set_loops_h(p->eng, loops);
+	else if (p->kind == PC98_KIND_MFDMIDI) mfdmidi_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_FMD) fmd_set_loops_h(p->eng, loops);
 	else if (p->kind == PC98_KIND_SET) hoot_set_loops_h(p->eng, loops);
 }
@@ -547,6 +566,7 @@ void pc98_player_apply_mute(pc98_player *p, const pc98_cfg *cfg)
 	else if (p->kind == PC98_KIND_GNTL) gntl_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_MMD) mmd_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_PAC) pac_apply_mute_h(p->eng, cfg);
+	else if (p->kind == PC98_KIND_MFDMIDI) mfdmidi_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_FMD) fmd_apply_mute_h(p->eng, cfg);
 	else if (p->kind == PC98_KIND_SET) hoot_apply_mute_h(p->eng, cfg);
 }

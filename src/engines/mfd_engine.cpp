@@ -4,7 +4,7 @@
  *
  * Notes: bytes < 0xB0 (low nibble = pitch, high bits = duration index).
  * 0xB0–0xBF: note + explicit 1/2-byte duration. Commands are 0xE0–0xFF.
- * .MFD sibling is SC-55 MIDI, not the FM bank.
+ * .MFD sibling is the SC-55 MIDI version (mfdmidi_engine), not the FM bank.
  *
  * Mix: cisc fmgen OPNA @ 55466 Hz, VolumeFM=0, SSG −18 dB (same as S98).
  * Night Slave NSA##.USO uses a matching ##.S98 dump when one is found

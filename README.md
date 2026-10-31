@@ -5,6 +5,17 @@ Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
 VERSIONINFO **1.0.36.0**; `PLUGIN_XMPVER` **1003600**.
 
+## 1.0.112 — MFD.COM `.MFD` (GS)
+
+- U.Kakenasi MFD.COM 1.8 MIDI songs (Night Slave `NSA##.MFD`, …) now play natively
+  through the SC-55 SF2. Before, `.MFD` next to a `set.pc98` fell to the Hoot path
+  and stayed silent. The `.USO` siblings are still the FM (USMD) versions.
+- Sequencer recovered from the unpacked driver: order lists with nested loops,
+  six note slots per track with their own gate, CC/bend/program groups with
+  built-in waits, Roland DT1 SysEx (`FC DF/DD/DE`), tempo `E0` (1.25/tempo s per tick).
+- MPU-401 bytes match the real MFD.COM under Unicorn, timing included, for all 50
+  Night Slave `.MFD` files (12000 ticks each). Length is intro + one loop.
+
 ## 1.0.36
 Eikan SSG drums sounded like sustained “waves”: opcode `84` enabled noise, but
 there was **no soft envelope**. Live driver keeps atten at `804D+ch` (same bytes
@@ -72,7 +83,7 @@ Authority: user HW MP3 (harness SSG amp stays muted via `[0x1CED]=0x7F`).
 Copy `xmp-pc98.dll` next to `xmplay.exe`.
 
 **OPNA rhythm (optional):** `ym2608_adpcm_rom.bin` or `2608_*.WAV` beside the DLL.
-**GS/SC-55 SF2:** for G_* NTL / PAC GM songs and MMD/FMD.
+**GS/SC-55 SF2:** for G_* NTL / PAC GM songs and MMD/FMD/MFD.
 
 ## Build
 
