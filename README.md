@@ -5,6 +5,13 @@ Display name **PC-98 / S98**. DLL `xmp-pc98.dll`.
 
 VERSIONINFO **1.0.36.0**; `PLUGIN_XMPVER` **1003600**.
 
+## 1.0.114 — Famicom EPSM `.vgm`
+
+- VGMs with a YM2608 plus the NES APU (FamiStudio NES + EPSM exports, e.g.
+  Rockman Zero 3 "Volcano") are now claimed. The YM2608 part plays; the NES APU
+  is not emulated and its writes are dropped (in that file they are only the
+  silent channel init).
+
 ## 1.0.113 — PC-98 / PC-88 `.vgm` / `.vgz`
 
 - VGM rips whose only chips are YM2608 and/or YM2203 (PC-9801-86/-26K, PC-88;
